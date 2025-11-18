@@ -36,6 +36,7 @@ from turbo_gepa.config import (
     adaptive_config,
     recommended_executor_workers,
 )
+from turbo_gepa.scoring import ScoringFn, SCORE_KEY
 from turbo_gepa.evaluator import AsyncEvaluator
 from turbo_gepa.interfaces import Candidate, EvalResult
 from turbo_gepa.islands import IslandContext, spawn_islands
@@ -151,6 +152,8 @@ class DefaultAdapter:
         task_lm_temperature: Temperature for task LLM (None = use model default)
         reflection_lm_temperature: Temperature for reflection LLM (None = use model default)
         auto_config: Enable automatic configuration with principled sharding (default: True)
+        scoring_fn: Optional callback accepting a ``ScoringContext`` that returns the
+            scalar score to optimize (defaults to ``maximize_metric(\"quality\")``)
 
     Example usage::
 
@@ -199,6 +202,7 @@ class DefaultAdapter:
         task_lm_temperature: float | None = None,
         reflection_lm_temperature: float | None = None,
         auto_config: bool = True,
+        scoring_fn: ScoringFn | None = None,
     ) -> None:
         if not dataset:
             raise ValueError("dataset must contain at least one data instance")
@@ -220,6 +224,9 @@ class DefaultAdapter:
             config = adaptive_config(len(dataset))
 
         config = replace(config)
+        config.promote_objective = SCORE_KEY
+        if scoring_fn is not None:
+            config.scoring_fn = scoring_fn
         self.config = config
         self.dataset = list(dataset)
 
@@ -257,10 +264,15 @@ class DefaultAdapter:
         self.logger = StdOutLogger(min_level=min_level)
         self._debug_enabled = min_level <= LogLevel.DEBUG
         import asyncio as _asyncio_adapter
-        _llm_limit = int(self.config.llm_connection_limit or self.config.eval_concurrency)
+        base_limit = int(self.config.llm_connection_limit or self.config.eval_concurrency)
         if self._fd_guard_limit is not None:
-            _llm_limit = min(_llm_limit, max(4, self._fd_guard_limit // 2))
-        self._llm_semaphore = _asyncio_adapter.Semaphore(max(1, _llm_limit))
+            base_limit = min(base_limit, max(4, self._fd_guard_limit // 2))
+        # Use separate semaphores for task and reflection calls so evaluation
+        # cannot starve mutation LLM calls (and vice versa).
+        task_limit = max(1, base_limit)
+        reflection_limit = max(1, base_limit // 2)
+        self._task_llm_semaphore = _asyncio_adapter.Semaphore(task_limit)
+        self._reflection_llm_semaphore = _asyncio_adapter.Semaphore(reflection_limit)
 
         # Normalise model configuration objects
         if isinstance(task_lm, ModelConfig):
@@ -359,13 +371,18 @@ class DefaultAdapter:
         if self._debug_enabled:
             self.logger.log(message, LogLevel.DEBUG)
 
-    async def _acompletion_with_client(self, acompletion, completion_kwargs: dict, timeout: float):
+    async def _acompletion_with_client(
+        self,
+        acompletion,
+        completion_kwargs: dict,
+        timeout: float,
+        semaphore=None,
+    ):
         """Call litellm.acompletion with our shared httpx client when supported.
 
         Tries 'httpx_client' then 'client' keyword; falls back to no client if unsupported.
         """
         import asyncio
-        semaphore = getattr(self, "_llm_semaphore", None)
 
         async def _invoke(kwargs: dict) -> Any:
             if semaphore is None:
@@ -491,7 +508,12 @@ class DefaultAdapter:
                     import asyncio
 
                     async def invoke_reflection():
-                        return await self._acompletion_with_client(acompletion, completion_kwargs, 180.0)
+                        return await self._acompletion_with_client(
+                            acompletion,
+                            completion_kwargs,
+                            180.0,
+                            semaphore=self._reflection_llm_semaphore,
+                        )
 
                     try:
                         response = await self._call_with_retries(
@@ -507,7 +529,12 @@ class DefaultAdapter:
                             )
 
                             async def invoke_no_temp():
-                                return await self._acompletion_with_client(acompletion, completion_kwargs, 180.0)
+                                return await self._acompletion_with_client(
+                                    acompletion,
+                                    completion_kwargs,
+                                    180.0,
+                                    semaphore=self._reflection_llm_semaphore,
+                                )
 
                             response = await self._call_with_retries(
                                 invoke_no_temp,
@@ -922,6 +949,9 @@ class DefaultAdapter:
             promote_objective=self.config.promote_objective,
             cancel_stragglers_immediately=self.config.cancel_stragglers_immediately,
             replay_stragglers=self.config.replay_stragglers,
+            min_samples_for_confidence=self.config.min_samples_for_confidence,
+            target_quality=self.config.target_quality,
+            confidence_z=self.config.confidence_z,
         )
 
         try:
@@ -1036,7 +1066,12 @@ class DefaultAdapter:
             _start_llm = _time_module.time()
 
             async def invoke():
-                return await self._acompletion_with_client(acompletion, completion_kwargs, 120.0)
+                return await self._acompletion_with_client(
+                    acompletion,
+                    completion_kwargs,
+                    120.0,
+                    semaphore=self._task_llm_semaphore,
+                )
 
             try:
                 response = await self._call_with_retries(invoke, label=f"task:{example_id}")
@@ -1062,7 +1097,12 @@ class DefaultAdapter:
                         candidate.meta.pop("temperature", None)
 
                     async def invoke_no_temp():
-                        return await self._acompletion_with_client(acompletion, completion_kwargs, 120.0)
+                        return await self._acompletion_with_client(
+                            acompletion,
+                            completion_kwargs,
+                            120.0,
+                            semaphore=self._task_llm_semaphore,
+                        )
 
                     response = await self._call_with_retries(
                         invoke_no_temp,
@@ -1174,6 +1214,8 @@ class DefaultAdapter:
             promote_objective=self.config.promote_objective,
             cancel_stragglers_immediately=self.config.cancel_stragglers_immediately,
             replay_stragglers=self.config.replay_stragglers,
+            min_samples_for_confidence=self.config.min_samples_for_confidence,
+            target_quality=self.config.target_quality,
         )
 
         base_run_id = getattr(self, "_current_run_token", None) or uuid.uuid4().hex[:8]

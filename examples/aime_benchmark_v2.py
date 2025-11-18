@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Tuple
 import gepa
 from turbo_gepa.adapters import DefaultAdapter, DefaultDataInst
 from turbo_gepa.config import Config, adaptive_config
+from turbo_gepa.scoring import ScoringContext
 
 
 # --------------------------------------------------------------------------------------
@@ -78,6 +79,23 @@ def _summarize_prompt(prompt_text: str | None, max_chars: int = 160) -> str:
         return "<empty>"
     text = prompt_text.replace("\n", " ").strip()
     return text[: max_chars - 3] + "..." if len(text) > max_chars else text
+
+
+def _quality_reward(ctx: ScoringContext) -> float:
+    """
+    Simple reward combining accuracy and token efficiency.
+
+    Treat quality as the primary objective, but gently penalize bloated prompts
+    by subtracting 0.01 points for every additional 1k tokens consumed. This
+    mirrors the style of custom reward functions users can plug into the adapter.
+    """
+
+    quality = float(ctx.result.objectives.get("quality", 0.0))
+    tokens = float(ctx.result.objectives.get("tokens", 0.0))
+    # Example alternative: include neg_tokens (e.g., cost savings). Uncomment to flip sign.
+    # neg_tokens = float(ctx.result.objectives.get("neg_tokens", 0.0))
+    # return 0.8 * quality + 0.2 * neg_tokens
+    return quality - 0.01 * (tokens / 1000.0)
 
 
 # --------------------------------------------------------------------------------------
@@ -168,6 +186,8 @@ def _build_turbo_config(dataset_size: int, args: argparse.Namespace) -> Config:
             config.eval_timeout_seconds = float(args.turbo_eval_timeout)
         except Exception:
             pass
+    if getattr(args, "turbo_verification_speed_bias", None) is not None:
+        config.verification_speed_bias = max(0.0, min(1.0, float(args.turbo_verification_speed_bias)))
     # Allow multiple full-shard candidates so slow OSS-20 calls overlap.
     final_cap = max(2, args.turbo_eval_concurrency // 2)
     config.max_final_shard_inflight = min(args.turbo_eval_concurrency, final_cap)
@@ -203,6 +223,7 @@ def run_turbo(
         reflection_lm=reflection_lm,
         config=config,
         auto_config=False,
+        scoring_fn=_quality_reward,
     )
     if getattr(args, "turbo_task_max_tokens", None):
         try:
@@ -259,6 +280,114 @@ def run_turbo(
             "evolution_edges": stats.get("evolution_edges"),
         },
     )
+
+
+async def _eval_prompt_on_val_async(
+    prompt: str,
+    valset: List[dict],
+    *,
+    task_lm: str,
+    reflection_lm: str,
+    eval_concurrency: int,
+) -> Tuple[float, float, int]:
+    """
+    Directly evaluate a single prompt on the full validation set.
+
+    This bypasses TurboGEPA's orchestration/straggler logic and simply runs
+    the task LLM once per validation example with bounded concurrency, then
+    returns the mean quality and tokens.
+    """
+
+    from turbo_gepa.interfaces import Candidate
+
+    dataset = [
+        DefaultDataInst(
+            input=example["input"],
+            answer=example["answer"],
+            additional_context=example.get("additional_context"),
+            id=f"val_{idx}",
+        )
+        for idx, example in enumerate(valset)
+    ]
+
+    config = adaptive_config(len(dataset))
+    config.n_islands = 1
+    config.eval_concurrency = max(1, min(eval_concurrency, len(dataset)))
+    config.batch_size = len(dataset)
+    # Disable any target-based early stop; we want full coverage.
+    config.target_quality = None
+
+    adapter = DefaultAdapter(
+        dataset=dataset,
+        task_lm=task_lm,
+        reflection_lm=reflection_lm,
+        config=config,
+        auto_config=False,
+        scoring_fn=_quality_reward,
+    )
+
+    sem = asyncio.Semaphore(config.eval_concurrency)
+    candidate = Candidate(text=prompt, meta={"source": "final_val"})
+    qualities: List[float] = []
+    tokens: List[float] = []
+
+    async def eval_one(example_id: str) -> None:
+        async with sem:
+            metrics = await adapter._task_runner(candidate, example_id)  # type: ignore[attr-defined]
+            q = metrics.get("quality")
+            if isinstance(q, (int, float)):
+                qualities.append(float(q))
+            t = metrics.get("tokens")
+            if isinstance(t, (int, float)):
+                tokens.append(float(t))
+
+    try:
+        await asyncio.gather(*(eval_one(inst.id) for inst in dataset))
+    finally:
+        await adapter.aclose()
+
+    if not qualities:
+        return 0.0, 0.0, 0
+
+    mean_quality = sum(qualities) / len(qualities)
+    mean_tokens = sum(tokens) / len(tokens) if tokens else 0.0
+    return mean_quality, mean_tokens, len(qualities)
+
+
+def run_turbo_validation(
+    valset: List[dict],
+    *,
+    task_lm: str,
+    reflection_lm: str,
+    best_prompt: str,
+    eval_concurrency: int,
+) -> Tuple[float, float, int]:
+    """
+    Public helper: evaluate a TurboGEPA-derived best prompt on the full
+    validation set and return (mean_quality, mean_tokens, n_examples).
+
+    This is intentionally separate from the main TurboGEPA run so callers
+    can choose when to pay the extra validation cost.
+    """
+
+    print("\n=== TurboGEPA validation on full AIME val set ===")
+    print(f"Best prompt (snippet): {_summarize_prompt(best_prompt)}")
+
+    mean_quality, mean_tokens, count = asyncio.run(
+        _eval_prompt_on_val_async(
+            best_prompt,
+            valset,
+            task_lm=task_lm,
+            reflection_lm=reflection_lm,
+            eval_concurrency=eval_concurrency,
+        )
+    )
+
+    print(
+        f"TurboGEPA validation: quality={mean_quality:.3f} "
+        f"(tokens={mean_tokens:.1f}, examples={count})"
+    )
+    return mean_quality, mean_tokens, count
 
 
 # --------------------------------------------------------------------------------------
@@ -323,6 +452,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--turbo-log-level", default="WARNING")
     parser.add_argument("--turbo-show-progress", action="store_true")
     parser.add_argument("--turbo-n-islands", type=int, default=1)
+    parser.add_argument("--turbo-verification-speed-bias", type=float, default=None)
     parser.add_argument("--open-ui", action="store_true", help="Open live evolution UI (http://localhost:8080/scripts/evolution_live.html)")
     parser.add_argument(
         "--turbo-strategies",

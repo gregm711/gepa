@@ -18,6 +18,7 @@ from turbo_gepa.strategies import (
     ReflectionStrategy,
     resolve_reflection_strategy_names,
 )
+from turbo_gepa.scoring import ScoringFn, maximize_metric, SCORE_KEY
 
 
 def _default_variance_tolerance(shards: Sequence[float]) -> dict[float, float]:
@@ -267,7 +268,8 @@ class Config:
     control_dir: str | None = None
     batch_size: int | None = None  # Auto-scaled to eval_concurrency if None
     queue_limit: int | None = None  # Auto-scaled to 2x eval_concurrency if None
-    promote_objective: str = "quality"
+    scoring_fn: ScoringFn = maximize_metric("quality")
+    promote_objective: str = SCORE_KEY
     max_mutations_per_round: int | None = None  # Auto-scaled to eval_concurrency if None
     mutation_buffer_limit: int | None = None  # Max pending streamed mutations awaiting queue capacity
     task_lm_temperature: float | None = 1.0
@@ -278,30 +280,28 @@ class Config:
     max_optimization_time_seconds: float | None = None  # Global timeout - stop optimization after this many seconds
     reflection_strategy_names: tuple[str, ...] | None = None  # Default to all known strategies
     reflection_strategies: tuple[ReflectionStrategy, ...] | None = None
-    max_final_shard_inflight: int | None = 2  # Limit concurrent full-shard evaluations (None = unlimited)
+    max_final_shard_inflight: int | None = None  # If None, derive cap from eval_concurrency
     straggler_grace_seconds: float = 5.0  # Wait this long for detached stragglers before replaying
-    final_rung_straggler_grace_seconds: float | None = 2.0  # Extra-short grace before replay on final rung
     final_rung_min_inflight: int = 2  # Do not shrink final rung concurrency below this floor
-    final_rung_target_utilization: float = 0.75  # Utilization threshold when deciding to reduce the cap
-    final_rung_backlog_to_expand: int | None = None  # Queue of full-shard candidates that justifies expansion
-    final_rung_saturation_seconds: float = 3.0  # How long saturation must persist before forcing expansion
     final_rung_cap_max_fraction: float | None = None  # Max share of eval_concurrency allocated to final rung
-    final_rung_cap_latency_expand: float = 1.2  # Expand cap when p95 < expand * p50
-    final_rung_cap_latency_shrink: float = 1.6  # Shrink cap when p95 > shrink * p50
-    final_rung_cap_timeout_threshold: float = 0.2  # Shrink cap when timeout ratio exceeds this
-    final_rung_cap_cooldown_seconds: float = 3.0  # Minimum time between cap adjustments
-    final_rung_cap_straggler_window: float = 20.0  # Sliding window to measure straggler pressure
-    cancel_stragglers_immediately: bool = True  # Cancel detached example tasks right away
+    cancel_stragglers_immediately: bool = False  # Let detached example tasks finish in background
     replay_stragglers: bool = True  # Re-evaluate missing examples after straggler cancellation
     replay_workers: int | None = None  # Number of background workers for straggler replays
     replay_worker_queue_size: int | None = None  # Optional bound for replay queue
     replay_concurrency: int | None = None  # Max concurrency per replay evaluation
-    target_confidence: float = 0.95  # Confidence level for statistical promotion checks
-    min_samples_for_confidence: int = 20  # Require at least this many examples before using CI
+    # Single knob for verification speed/accuracy tradeoff:
+    #   0.0 = strict / slow
+    #   1.0 = aggressive / fast
+    verification_speed_bias: float = 0.3
+    # Minimum samples before early success checks (shaped from speed-bias)
+    min_samples_for_confidence: int | None = None
+    # Global confidence margin (z-score) derived from verification_speed_bias.
+    # Used by evaluators as the number of standard errors to subtract from the
+    # running mean when deciding if we've confidently cleared a target.
+    confidence_z: float | None = None
     llm_connection_limit: int | None = None  # Cap simultaneous LLM calls (defaults to 1.5x eval_concurrency)
     # Dynamically scale effective evaluation concurrency to maximize throughput
     auto_scale_eval_concurrency: bool = True
-    min_effective_concurrency: int | None = None  # If None, defaults to max(2, eval_concurrency//2)
     # Enforce a global example-level budget across all candidates to avoid oversubscription
     global_concurrency_budget: bool = True
     latest_results_limit: int = 2048
@@ -352,11 +352,6 @@ class Config:
         if self.llm_connection_limit is None:
             self.llm_connection_limit = max(8, int(self.eval_concurrency * 1.5))
 
-        # Set default floor for effective concurrency if not provided
-        if self.min_effective_concurrency is None:
-            # Keep at ~75% of the ceiling to avoid over-throttling during brief p95 spikes
-            self.min_effective_concurrency = max(2, int(round(self.eval_concurrency * 0.75)))
-
         if self.target_shard_fraction is None:
             self.target_shard_fraction = 1.0
 
@@ -373,38 +368,27 @@ class Config:
 
         # Final rung concurrency guardrails
         self.final_rung_min_inflight = max(1, int(self.final_rung_min_inflight or 1))
-        self.final_rung_target_utilization = max(
-            0.1, min(float(self.final_rung_target_utilization or 0.75), 1.0)
-        )
-        if self.final_rung_backlog_to_expand is None:
-            self.final_rung_backlog_to_expand = max(1, self.eval_concurrency // 6)
-        else:
-            self.final_rung_backlog_to_expand = max(1, int(self.final_rung_backlog_to_expand))
-        self.final_rung_saturation_seconds = max(0.5, float(self.final_rung_saturation_seconds or 0.5))
         cap_max_fraction = self.final_rung_cap_max_fraction
         if cap_max_fraction is None:
-            # Default: allow up to half the evaluators to sit on final rung
-            cap_max_fraction = 0.5
+            # Default: allow the final rung to use up to 100% of eval_concurrency.
+            cap_max_fraction = 1.0
         cap_max_fraction = max(0.1, min(1.0, float(cap_max_fraction)))
         self.final_rung_cap_max_fraction = cap_max_fraction
 
         if self.max_final_shard_inflight is not None:
             self.max_final_shard_inflight = max(self.final_rung_min_inflight, int(self.max_final_shard_inflight))
         else:
-            # Auto-set default cap from eval_concurrency and max fraction
-            self.max_final_shard_inflight = max(
-                self.final_rung_min_inflight,
-                int(max(1, self.eval_concurrency) * self.final_rung_cap_max_fraction),
-            )
+            # Auto-set default cap from eval_concurrency:
+            # - Aim for ~half of eval_concurrency allocated to final-rung candidates
+            # - Respect the max fraction guardrail and the minimum inflight floor
+            eval_cap = max(1, int(self.eval_concurrency))
+            half_cap = max(1, eval_cap // 2)
+            frac_cap = int(eval_cap * self.final_rung_cap_max_fraction)
+            if frac_cap <= 0:
+                frac_cap = 1
+            base_cap = min(half_cap, frac_cap)
+            self.max_final_shard_inflight = max(self.final_rung_min_inflight, base_cap)
 
-        self.final_rung_cap_latency_expand = max(1.05, float(self.final_rung_cap_latency_expand or 1.2))
-        self.final_rung_cap_latency_shrink = max(
-            self.final_rung_cap_latency_expand + 0.1,
-            float(self.final_rung_cap_latency_shrink or 1.6),
-        )
-        self.final_rung_cap_timeout_threshold = max(0.0, min(1.0, float(self.final_rung_cap_timeout_threshold or 0.2)))
-        self.final_rung_cap_cooldown_seconds = max(0.5, float(self.final_rung_cap_cooldown_seconds or 0.5))
-        self.final_rung_cap_straggler_window = max(1.0, float(self.final_rung_cap_straggler_window or 20.0))
         if self.replay_workers is None:
             # Default: dedicate ~10% of evaluator concurrency, at least 1
             self.replay_workers = max(1, int(round(self.eval_concurrency * 0.1)))
@@ -417,6 +401,8 @@ class Config:
         if self.replay_worker_queue_size is not None:
             self.replay_worker_queue_size = max(1, int(self.replay_worker_queue_size))
 
+        self._apply_verification_profile()
+
         custom_strategies = list(self.reflection_strategies or ())
         resolved_defaults = list(resolve_reflection_strategy_names(self.reflection_strategy_names))
         resolved_defaults.extend(custom_strategies)
@@ -426,6 +412,35 @@ class Config:
                 "Provide reflection_strategy_names or reflection_strategies."
             )
         self.reflection_strategies = tuple(resolved_defaults)
+        self.promote_objective = SCORE_KEY
+
+    def _apply_verification_profile(self) -> None:
+        """Derive verification thresholds from the configured risk knob."""
+
+        speed = max(0.0, min(1.0, float(self.verification_speed_bias)))
+        # Expose the clipped value so downstream consumers see the effective bias.
+        self.verification_speed_bias = speed
+        # Use a non-linear mapping so higher values of the dial have a
+        # disproportionately stronger effect. This keeps low/medium settings
+        # close to the current behaviour but makes 0.8–1.0 meaningfully more
+        # aggressive.
+        fast = speed**2.5
+
+        def _blend(high: float, low: float) -> float:
+            return high + (low - high) * fast
+
+        if self.min_samples_for_confidence is None:
+            # Require many samples at slow end, very few at the fastest.
+            samples = int(round(_blend(30, 3)))
+            self.min_samples_for_confidence = max(1, samples)
+
+        # Derive a global z-score (confidence margin) from the same dial.
+        # At the slow/accuracy end we want a conservative margin (~95% CI),
+        # while at the fast end we accept much tighter bounds.
+        z_slow = 2.0   # ~95% confidence
+        z_fast = 0.3   # very permissive, speed-biased
+        z = z_slow - (z_slow - z_fast) * fast
+        self.confidence_z = float(max(0.0, z))
 
 
 DEFAULT_CONFIG = Config()

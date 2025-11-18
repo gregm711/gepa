@@ -12,7 +12,7 @@ import asyncio
 import math
 from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Sequence, Any
 
-from turbo_gepa.logging.logger import LoggerProtocol, StdOutLogger
+from turbo_gepa.logging.logger import LoggerProtocol, StdOutLogger, LogLevel
 
 from .cache import DiskCache
 from .interfaces import Candidate, EvalResult
@@ -43,6 +43,9 @@ class AsyncEvaluator:
         promote_objective: str = "quality",
         cancel_stragglers_immediately: bool = True,
         replay_stragglers: bool = True,
+        min_samples_for_confidence: int = 20,
+        target_quality: float | None = None,
+        confidence_z: float | None = None,
     ) -> None:
         self.cache = cache
         self.task_runner = task_runner
@@ -62,6 +65,13 @@ class AsyncEvaluator:
         self.replay_stragglers = bool(replay_stragglers)
         self._use_straggler_futures = not self.cancel_stragglers_immediately and self.replay_stragglers
         self._straggler_results: dict[tuple[str, str], asyncio.Future[EvalResult]] = {}
+        self._tail_ratio: float = 1.0
+        self.min_samples_for_confidence = max(1, int(min_samples_for_confidence))
+        self.target_quality = target_quality
+        # Confidence margin (in standard errors) used for lower-bound checks on
+        # final-rung early success. When zero or None we fall back to using the
+        # plain running mean as before.
+        self.confidence_z: float = float(confidence_z) if confidence_z is not None else 0.0
 
     async def eval_on_shard(
         self,
@@ -73,6 +83,7 @@ class AsyncEvaluator:
         early_stop_fraction: float = 0.9,  # Return after 90% complete
         is_final_shard: bool = False,
         *,
+        coverage_target: float | None = None,
         on_partial: Callable[[Candidate, EvalResult], Awaitable[None]] | None = None,
         partial_min_samples: int = 2,
         partial_interval_seconds: float = 1.5,
@@ -152,7 +163,9 @@ class AsyncEvaluator:
         eval_durations: list[float] = []  # Track how long each eval took (excluding cached)
         quality_lock = asyncio.Lock()
         running_quality = 0.0
+        running_sq = 0.0  # Sum of squared qualities (approximate, batch-weighted)
         early_stop_flag = False
+        early_stop_reason: str | None = None
         straggler_detached_total = 0
         candidate_fp = candidate.fingerprint
         deliver_flags: dict[str, bool] = {ex_id: True for ex_id in example_ids}
@@ -164,6 +177,26 @@ class AsyncEvaluator:
         partial_n: int = 0
         partial_example_ids: list[str] = []
         last_partial_publish: float = 0.0
+        min_detach_samples = 0
+
+        def _required_detach_samples() -> int:
+            nonlocal min_detach_samples
+            if min_detach_samples:
+                return min_detach_samples
+            if total <= 0:
+                min_detach_samples = 0
+                return 0
+            # With coverage floors removed in fast profiles, we allow the
+            # straggler detector to operate purely on latency statistics.
+            # As soon as at least one example has completed, slow tasks can
+            # be detached when they exceed the dynamic threshold.
+            min_detach_samples = 0
+            return min_detach_samples
+
+        # CI-based early-stop is intentionally disabled for now. Between the
+        # parent-target bound below and the shard-level straggler logic we
+        # already have sufficient safeguards, and keeping this simple avoids
+        # surprising behaviour when the underlying latency distribution shifts.
 
         def _ensure_straggler_future(example_id: str) -> asyncio.Future[EvalResult] | None:
             if not self._use_straggler_futures:
@@ -201,7 +234,7 @@ class AsyncEvaluator:
         async def _register_result(result: EvalResult, quality_override: float | None = None) -> None:
             # Update outer-scope accumulators for partial publishing and gating.
             # We mutate these counters here, so declare them nonlocal.
-            nonlocal completed, running_quality, early_stop_flag, partial_n, last_partial_publish
+            nonlocal completed, running_quality, running_sq, early_stop_flag, partial_n, last_partial_publish, early_stop_reason
             async with quality_lock:
                 results.append(result)
                 completed += result.n_examples
@@ -218,7 +251,10 @@ class AsyncEvaluator:
                     if isinstance(obj_quality, (int, float)):
                         q_val = float(obj_quality)
                 if isinstance(q_val, (int, float)):
-                    running_quality += float(q_val) * max(1, result.n_examples)
+                    q_val_f = float(q_val)
+                    n = max(1, result.n_examples)
+                    running_quality += q_val_f * n
+                    running_sq += (q_val_f * q_val_f) * n
                 if (
                     not early_stop_flag
                     and parent_target is not None
@@ -232,10 +268,50 @@ class AsyncEvaluator:
                         early_stop_flag = True
                         # Track early stopping event
                         if self.metrics:
-                            self.metrics.record_early_stop("parent_target")
+                            self.metrics.record_early_stop("parent_target", is_final_rung=is_final_shard)
                         if show_progress:
                             self.logger.log(
                                 f"⚠️ Early stop: candidate {candidate.fingerprint[:12]} cannot beat parent target {parent_target:.1%}"
+                            )
+                # Simple early-stop for success: once we've seen enough samples
+                # and the running mean (or its confidence lower bound on the
+                # final rung) clears the configured target_quality, there is no
+                # need to wait for remaining examples unless a stricter policy
+                # is desired.
+                if (
+                    not early_stop_flag
+                    and self.target_quality is not None
+                    and total > 0
+                    and completed >= max(1, self.min_samples_for_confidence)
+                ):
+                    running_mean = running_quality / max(completed, 1)
+                    # Default lower bound is the mean itself; for the final rung
+                    # we optionally subtract a configurable number of standard
+                    # errors derived from verification_speed_bias.
+                    lb = running_mean
+                    if is_final_shard and self.confidence_z > 0.0 and completed >= 2:
+                        try:
+                            import math
+
+                            mean_sq = running_sq / max(completed, 1)
+                            variance = max(0.0, mean_sq - running_mean * running_mean)
+                            if variance > 0.0:
+                                se = math.sqrt(variance / max(completed, 1))
+                                lb = running_mean - self.confidence_z * se
+                        except Exception:
+                            # If anything goes wrong computing the bound, fall
+                            # back to the plain mean-based check.
+                            lb = running_mean
+                    if lb >= self.target_quality:
+                        early_stop_flag = True
+                        early_stop_reason = "target_quality"
+                        if self.metrics:
+                            self.metrics.record_early_stop("target_quality", is_final_rung=is_final_shard)
+                        if show_progress:
+                            self.logger.log(
+                                f"⚡ Early success: candidate {candidate.fingerprint[:12]} "
+                                f"cleared target_quality {self.target_quality:.1%} "
+                                f"(mean={running_mean:.1%} on {completed} examples)"
                             )
                 # Partial publish
                 if on_partial is not None and total > 0:
@@ -280,8 +356,16 @@ class AsyncEvaluator:
                     if isinstance(q, (int, float)):
                         quality_val = float(q)
                 await _deliver_result(cached, quality_val, example_id)
-                if show_progress:
-                    self.logger.log(f"Progress: {completed}/{total} examples ({completed / max(total, 1) * 100:.0f}%)")
+                if show_progress and total > 0:
+                    # Debug-level per-example progress; round-level stats are handled elsewhere.
+                    try:
+                        pct = completed / max(total, 1) * 100
+                    except Exception:
+                        pct = 0.0
+                    self.logger.log(
+                        f"Progress: {completed}/{total} examples ({pct:.0f}%)",
+                        LogLevel.DEBUG,
+                    )
                 return
 
             # Track cache miss
@@ -289,8 +373,11 @@ class AsyncEvaluator:
                 self.metrics.record_cache_lookup(hit=False)
 
             try:
-                # ALWAYS log when we're about to start an API call for straggler debugging
-                self.logger.log(f"🔄 Starting eval for example {example_id} at t={time.time() - batch_start_time:.1f}s (inflight: {self._inflight_examples})")
+                # Per-example launch logging kept at a low level to avoid spam.
+                self.logger.log(
+                    f"🔄 Starting eval for example {example_id} at t={time.time() - batch_start_time:.1f}s (inflight: {self._inflight_examples})",
+                    LogLevel.DEBUG,
+                )
 
                 async with semaphore:
                     self._inflight_examples += 1
@@ -305,8 +392,11 @@ class AsyncEvaluator:
                         metrics = await task
                     _elapsed_api = time.time() - _start_api
 
-                    # ALWAYS log completion time for straggler debugging
-                    self.logger.log(f"✅ Completed eval for example {example_id} in {_elapsed_api:.1f}s at t={time.time() - batch_start_time:.1f}s")
+                    # Completion timing is useful for debugging but too verbose for high-level progress.
+                    self.logger.log(
+                        f"✅ Completed eval for example {example_id} in {_elapsed_api:.1f}s at t={time.time() - batch_start_time:.1f}s",
+                        LogLevel.DEBUG,
+                    )
 
                 # Ensure inflight counter is decremented even if mapper raises
                 self._inflight_examples = max(0, self._inflight_examples - 1)
@@ -446,15 +536,7 @@ class AsyncEvaluator:
                     # Dynamic coverage trigger: start detaching earlier on small batches
                     # min_cov = max(base, min(0.6, 5/total))
                     # base = 0.25 (partial rungs) or 0.30 (final rung)
-                    completed >= max(
-                        1,
-                        int(
-                            math.ceil(
-                                (max((0.3 if is_final_shard else 0.25), min(0.6, 5.0 / max(total, 1))))
-                                * total
-                            )
-                        ),
-                    )
+                    completed >= max(1, _required_detach_samples())
                 )
             ):
                 import statistics
@@ -536,37 +618,6 @@ class AsyncEvaluator:
                             f"⚡ Detaching straggler #{straggler_count} (example {example_id}) at {completed}/{total} "
                             f"({completed / denom * 100:.0f}%), elapsed {elapsed_task:.1f}s > threshold {threshold:.1f}s + slack {detach_margin:.1f}s"
                         )
-                # Expedite final rung closure when tails dominate and coverage is high
-                if (
-                    is_final_shard
-                    and total > 0
-                    and (completed / max(total, 1)) >= max(0.7, 1.0 - 5.0 / max(total, 1))
-                    and len(pending) > 0
-                ):
-                    import statistics as _stats
-                    p50 = (
-                        _stats.quantiles(eval_durations, n=100)[49]
-                        if len(eval_durations) >= 5
-                        else mean_duration
-                    )
-                    if perc80 > max(2.0 * p50, 1.6 * mean_duration):
-                        for task, info in list(pending.items()):
-                            example_id = info["example_id"]
-                            if not deliver_flags.get(example_id, True):
-                                continue
-                            deliver_flags[example_id] = False
-                            if self.cancel_stragglers_immediately:
-                                task.cancel()
-                            else:
-                                _ensure_straggler_future(example_id)
-                            pending.pop(task, None)
-                            await asyncio.sleep(0)
-                            straggler_count += 1
-                            detached = True
-                            self.logger.log(
-                                f"⚡ Detaching tail straggler (final rung expedite) example {example_id}"
-                            )
-
                 if detached and straggler_count:
                     active_total = len(pending) + completed + straggler_count
                     self.logger.log(
@@ -575,7 +626,7 @@ class AsyncEvaluator:
                     )
                     straggler_detached_total += straggler_count
                     if self.metrics:
-                        self.metrics.record_early_stop("stragglers")
+                        self.metrics.record_early_stop("stragglers", is_final_rung=is_final_shard)
 
             if not pending:
                 break
@@ -610,14 +661,22 @@ class AsyncEvaluator:
 
         # Log batch completion metrics
         batch_duration = time.time() - batch_start_time
-        if show_progress and eval_durations:
+        if eval_durations:
             import statistics
             mean_dur = statistics.fmean(eval_durations)
             stdev_dur = statistics.pstdev(eval_durations) if len(eval_durations) > 1 else 0.0
-            self.logger.log(
-                f"⏱️  Batch complete: {len(results)}/{total} examples in {batch_duration:.1f}s "
-                f"(mean={mean_dur:.1f}s, stdev={stdev_dur:.1f}s, throughput={len(results)/batch_duration:.1f} ex/s)"
-            )
+            try:
+                p50 = statistics.quantiles(eval_durations, n=100)[49]
+                p95 = statistics.quantiles(eval_durations, n=100)[94]
+            except Exception:
+                p50 = mean_dur
+                p95 = max(mean_dur, max(eval_durations))
+            self._tail_ratio = float(p95 / max(p50, 1e-3)) if p50 else float("inf")
+            if show_progress:
+                self.logger.log(
+                    f"⏱️  Batch complete: {len(results)}/{total} examples in {batch_duration:.1f}s "
+                    f"(mean={mean_dur:.1f}s, stdev={stdev_dur:.1f}s, throughput={len(results)/batch_duration:.1f} ex/s)"
+                )
 
         totals: dict[str, float] = {}
         traces: list[dict[str, float]] = []
@@ -665,6 +724,10 @@ class AsyncEvaluator:
     def max_observed_inflight(self) -> int:
         """Highest concurrent example-level evaluations seen since instantiation."""
         return self._max_observed_inflight
+
+    @property
+    def tail_latency_ratio(self) -> float:
+        return max(1.0, float(self._tail_ratio))
 
     async def collect_straggler_results(
         self,
