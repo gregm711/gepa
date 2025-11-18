@@ -399,7 +399,7 @@ graph TB
     Archive --> Check1{Quality<br/>Target Met?}
 
     Check1 -->|No| Phase1
-    Check1 -->|Yes| Phase2{Phase 2<br/>Temperature Cycling}
+    Check1 -->|Yes| Phase2{Phase 2 (optional)<br/>Temperature Cycling}
 
     Phase2 --> TempExplore[Temperature Exploration<br/>±0.2 variations]
     TempExplore --> EvalTemp[Evaluate Variants]
@@ -419,11 +419,11 @@ graph TB
     style Results fill:#d4edda
 ```
 
-**Two-Phase Process**:
+**Two-Phase Process (optional)**:
 
-- **Phase 1**: Main optimization with LLM-based mutations (reflection + spec induction) and ASHA pruning (70% of budget)
-- **Phase 2**: Single round of temperature exploration to find optimal stochasticity (30% of budget)
-- **Auto-Stop**: Exits Phase 1 when no improvement detected (convergence)
+- **Phase 1**: Main optimization with LLM-based mutations (reflection + spec induction + interleaved thinking) and ASHA-style pruning. This is the default path used in fast profiles such as the 30-example AIME benchmarks.
+- **Phase 2** *(optional)*: When `optimize_temperature_after_convergence=True`, TurboGEPA runs a short temperature sweep on top prompts as a second stage (applied only when explicitly enabled).
+- **Auto-Stop**: Exits the optimization loop when convergence is detected (no improvement across multiple rounds) or a target quality threshold is reached.
 
 ---
 
@@ -456,11 +456,6 @@ graph TD
     Arch3 -->|Continuously<br/>Top-3 elites| Pop4
     Arch4 -->|Continuously<br/>Top-3 elites| Pop1
 
-    Pop1 -.->|Concurrent<br/>Optimization| Process1[Process 1]
-    Pop2 -.->|Concurrent<br/>Optimization| Process2[Process 2]
-    Pop3 -.->|Concurrent<br/>Optimization| Process3[Process 3]
-    Pop4 -.->|Concurrent<br/>Optimization| Process4[Process 4]
-
     style Island1 fill:#e3f2fd
     style Island2 fill:#f3e5f5
     style Island3 fill:#e8f5e9
@@ -486,13 +481,13 @@ graph TD
 - **Diversity**: Every island now broadcasts its top elites to all peers (not just the next hop), so promising edits propagate immediately while each island still evolves independently.
 - **Robustness**: Different islands may discover different high-quality regions and immediately cross-pollinate those parents, preventing stagnation.
 
-> **Note:** Internally we still allocate queues in a ring for efficiency, but both the in-process (`LocalQueueMigrationBackend`) and filesystem (`FileMigrationBackend`) paths broadcast elites. Tune sharing frequency with `migration_k`/`migration_period`, and set `TURBOGEPA_CONTROL_PATH`/`--control-dir` plus `TURBOGEPA_RUN_ID` when running distributed workers so migrations and control files stay coordinated.
+> **Note:** By default, islands run as async tasks in a single process via `spawn_islands`, and the `LocalQueueMigrationBackend` broadcasts elites to all peers. When you use distributed workers (`turbo-gepa-worker` or `run_local_multiworker` with `FileMigrationBackend`), the same broadcast pattern applies across processes. Tune sharing frequency with `migration_k`/`migration_period`, and set `TURBOGEPA_CONTROL_PATH`/`--control-dir` plus `TURBOGEPA_RUN_ID` when coordinating multiple workers.
 
-### TurboGEPA Two-Phase Optimization
+### TurboGEPA Two-Phase Optimization (advanced mode)
 
 ```mermaid
 graph TB
-    subgraph Phase1["Phase 1: Prompt Evolution (70% of budget)"]
+    subgraph Phase1["Phase 1: Prompt Evolution"]
         Start[Parent Contexts<br/>prompt + traces + failures] --> Allocate{Adaptive Budget<br/>Allocation}
 
         Allocate -->|60-70%| Reflection[Incremental Reflection]
@@ -521,7 +516,7 @@ graph TB
     Convergence -->|Yes| Phase2Start[Phase 2 Begins]
     Convergence -->|No| Start
 
-    subgraph Phase2["Phase 2: Temperature Cycling (30% of budget)"]
+    subgraph Phase2["Phase 2: Temperature Cycling"]
         Phase2Start --> TopPrompts[Select Top Prompts<br/>from Phase 1]
         TopPrompts --> TempRange["Generate Temperature Variants<br/>0.0, 0.3, 0.5, 0.7, 1.0<br/>±0.2 around baseline"]
         TempRange --> ASHA2[ASHA Evaluation<br/>Temperature Grid]
@@ -541,36 +536,34 @@ graph TB
     style Convergence fill:#ffeaa7
 ```
 
-**Phase 1: Prompt Evolution (70% of budget)**
+**Phase 1: Prompt Evolution**
 
 TurboGEPA uses two complementary mutation strategies that both receive the same context (parent prompts + execution traces + failures):
 
-#### 1. **Incremental Reflection** (60-70% of Phase 1)
+#### 1. **Incremental Reflection**
 
 - **Strategy**: Iteratively improve existing prompts by analyzing failures
 - **Approach**: "Here's what failed. Edit the prompt to fix these specific issues."
 - **Best for**: Fine-tuning and debugging existing prompts
 
-#### 2. **Spec Induction** (30-40% of Phase 1) - [Prompt-MII](https://arxiv.org/abs/2510.16932) Style
+#### 2. **Spec Induction** - [Prompt-MII](https://arxiv.org/abs/2510.16932) Style
 
 - **Strategy**: Generate fresh prompt specifications using meta-learning
 - **Approach**: "Looking at this prompt and what failed, generate a FRESH specification that solves the task differently."
 - **Best for**: Exploration, escaping local optima, discovering novel approaches
 
-**Adaptive Weighting**: Success rates tracked per operator; budget allocated dynamically to the most effective strategies.
+**Operator weighting:** TurboGEPA tracks per-operator success rates via `Metrics` and can bias mutation budgets toward strategies that are working well, but the exact 60/40 split is conceptual here rather than a hard-coded allocator.
 
-**Auto-Stop**: Phase 1 automatically terminates when convergence is detected (no improvement across multiple rounds), saving compute.
+**Auto-Stop:** Phase 1 automatically terminates when convergence is detected (no improvement across multiple rounds) or a target quality threshold is hit, saving compute.
 
----
+**Phase 2 (optional): Temperature Cycling**
 
-**Phase 2: Temperature Cycling (30% of budget)**
+When `optimize_temperature_after_convergence=True`, TurboGEPA freezes prompt exploration and runs a focused temperature sweep:
 
-After prompt optimization converges, TurboGEPA freezes prompt exploration and runs a dedicated temperature sweep:
-
-- **Select top prompts** from Phase 1 Pareto frontier
-- **Generate temperature grid** anchored to each prompt's meta (0.0, 0.3, 0.5, 0.7, 1.0 and ±0.2 around baseline, clamped to [0.0, 1.0])
-- **Enable temperature mutations only** and evaluate with ASHA (no prompt edits in this phase)
-- **Output**: Best prompt paired with its optimal temperature
+- **Select top prompts** from the Phase 1 Pareto frontier
+- **Generate temperature variants** anchored to each prompt’s baseline temperature
+- **Enable temperature mutations only** and evaluate with the same ASHA-style scheduler (no further prompt edits)
+- **Output**: Best prompt paired with an empirically tuned temperature
 
 ### TurboGEPA Enhancements
 
@@ -629,12 +622,12 @@ graph TD
 - **With ASHA**: (100 × 5%) + (40 × 20%) + (16 × 100%) = **29 full evaluation equivalents**
 - **Savings**: ~**71% fewer evaluations** while keeping the best candidates
 
-**How It Works**: Start with many candidates on cheap evaluations (5% data), progressively promote only the top performers to more expensive evaluations (20%, then 100%). Most poor candidates are eliminated early before wasting compute. TurboGEPA never cancels evaluations on the final rung—once a candidate reaches the 100 % shard, every example finishes so convergence decisions reflect the full dataset.
+**How It Works**: Start with many candidates on cheap evaluations (small shards), progressively promote only the top performers to larger shards (e.g., 40% → 63% → 100% for the 30-example AIME setup). Most poor candidates are eliminated early before wasting compute. On the final rung, TurboGEPA may still early-stop based on confidence and straggler heuristics—especially in speed-first profiles—but conceptually follows the same “few candidates on the expensive rung” pattern.
 
 #### 2. Async Orchestration
 
-- Scales to available compute resources automatically
-- Adaptive per-island concurrency based on dataset size and hardware
+- Uses async/await to overlap LLM calls and keep evaluators busy
+- Per-island concurrency is chosen from dataset size via `adaptive_config`, with simple runtime guardrails (FD limits, timeouts)
 - Multi-island parallelism for population diversity
 - Non-blocking I/O for LLM API calls
 - Thread pool executor for DSPy/sync operations
@@ -648,13 +641,13 @@ graph TD
 
 ### Practical Considerations
 
-TurboGEPA **automatically scales concurrency** to available resources. Real-world limits include:
+TurboGEPA **auto-configures concurrency** from dataset size and exposes explicit knobs for tuning. Real-world limits include:
 
 - **API Rate Limits**: Provider TPM (tokens/min) and RPM (requests/min) quotas
 - **Hardware**: CPU cores, memory, file descriptors, network bandwidth
 - **Dataset Size**: Auto-config adjusts based on training data volume
 
-The adaptive configuration automatically balances throughput and resource utilization based on dataset size. Override individual `Config` fields (e.g., `eval_concurrency`, `reflection_strategy_names`) when you need a laptop-safe or server-heavy profile.
+The adaptive configuration gives you a strong starting point, but you should still validate `eval_concurrency` and related knobs against your API quotas and hardware. Override individual `Config` fields (e.g., `eval_concurrency`, `reflection_strategy_names`) when you need a laptop-safe or server-heavy profile.
 
 ---
 
