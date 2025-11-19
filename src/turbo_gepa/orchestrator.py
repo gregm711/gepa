@@ -1172,18 +1172,18 @@ class Orchestrator:
         self._control_heartbeat("running", force=True)
 
         # Write evolution pointer immediately so dashboards can connect
-        print(f"DEBUG: Orchestrator resolving evo_dir from log_path={self.config.log_path}")
-        evo_dir = self._resolve_evo_dir()
-        print(f"DEBUG: Resolved evo_dir={evo_dir}")
-        os.makedirs(evo_dir, exist_ok=True)
-        cur = os.path.join(evo_dir, "current.json")
-        print(f"DEBUG: Writing current.json to {cur}")
-        with open(cur + ".tmp", "w", encoding="utf-8") as fcur:
-            json.dump({"run_id": self._run_id}, fcur)
-        os.replace(cur + ".tmp", cur)
-        # Also write a bootstrap snapshot so the live UI shows the seed immediately
         try:
-            self._persist_evolution_bootstrap(seeds, evo_dir)
+            evo_dir = self._resolve_evo_dir()
+            os.makedirs(evo_dir, exist_ok=True)
+            cur = os.path.join(evo_dir, "current.json")
+            with open(cur + ".tmp", "w", encoding="utf-8") as fcur:
+                json.dump({"run_id": self._run_id}, fcur)
+            os.replace(cur + ".tmp", cur)
+            # Also write a bootstrap snapshot so the live UI shows the seed immediately
+            try:
+                self._persist_evolution_bootstrap(seeds, evo_dir)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1214,8 +1214,6 @@ class Orchestrator:
         _debug_log_path: str | None = None
         _debug_log_file = None
         if self.config.enable_debug_log:
-            import os
-
             _debug_log_path = f".turbo_gepa/debug_{int(time.time())}.log"
             os.makedirs(os.path.dirname(_debug_log_path), exist_ok=True)
             _debug_log_file = open(_debug_log_path, "w", buffering=1)  # Line buffered
@@ -1599,7 +1597,6 @@ class Orchestrator:
             self.logger.log("\n" + metrics_summary)
 
         # Save metrics to .turbo_gepa/metrics/ directory
-        import os
         metrics_dir = ".turbo_gepa/metrics"
         os.makedirs(metrics_dir, exist_ok=True)
         timestamp = int(time.time())
