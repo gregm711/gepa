@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 # Config
-RUN_ID = f"mock-run-{uuid.uuid4().hex[:6]}"
+RUN_ID = "AIME_benchmark-17"
 NUM_ISLANDS = 4
 TURBO_DIR = Path(".turbo_gepa")
 EVO_DIR = TURBO_DIR / "evolution"
@@ -158,61 +158,92 @@ def write_evolution_file(nodes, edges, timeline):
         
     print(f"✅ Evolution graph written: {len(nodes)} nodes, {len(edges)} parents")
 
-def simulate_telemetry_loop():
-    print(f"🚀 Starting telemetry simulation for run {RUN_ID}...")
-    print("   (Keep this running. Open the dashboard now!)")
+def update_telemetry(t):
+    # Simulate varying load
+    base_eps = 15.0 + 10.0 * math.sin(t / 5.0)  # 5-25 EPS
+    base_lat = 0.8 + 0.4 * math.sin(t / 3.0)    # 0.4-1.2s latency
+    
+    for island in range(NUM_ISLANDS):
+        # Randomize per island
+        noise = random.uniform(0.8, 1.2)
+        eps = base_eps * noise / NUM_ISLANDS
+        lat = base_lat * noise
+        
+        # Queue buildup
+        q_ready = int(50 + 30 * math.sin(t / 10.0) + random.randint(-5, 5))
+        
+        snap = {
+            "timestamp": time.time(),
+            "eval_rate_eps": eps,
+            "mutation_rate_mps": eps * 0.8,
+            "inflight_requests": int(eps * 2),
+            "concurrency_limit": 64,
+            "queue_ready": q_ready,
+            "queue_mutation": int(q_ready / 2),
+            "queue_replay": random.randint(0, 5),
+            "straggler_count": random.randint(0, 2),
+            "latency_p50": lat,
+            "latency_p95": lat * 2.5,
+            "error_rate": 0.01 if random.random() > 0.9 else 0.0,
+            "run_id": RUN_ID,
+            "island_id": island
+        }
+        
+        path = TELEMETRY_DIR / f"telemetry_{RUN_ID}_{island}.json"
+        with open(path, "w") as f:
+            json.dump(snap, f)
+
+def main():
+    setup_dirs()
+    
+    # 1. Generate the FULL future graph (the "script")
+    full_nodes, full_edges, full_timeline = generate_graph()
+    max_gen = max(n["generation"] for n in full_nodes)
+    
+    print(f"🚀 Starting LIVE simulation for run {RUN_ID}...")
+    print(f"   Scripted {max_gen} generations. Open the dashboard now!")
+    print("   (Generations will reveal every 5 seconds)")
     
     start_time = time.time()
-    evals_completed = 0
+    current_gen = 0
+    last_gen_update = 0.0
+    GEN_INTERVAL = 5.0  # Seconds between generations
     
     try:
         while True:
-            t = time.time() - start_time
+            now = time.time()
+            t = now - start_time
             
-            # Simulate varying load
-            base_eps = 15.0 + 10.0 * math.sin(t / 5.0)  # 5-25 EPS
-            base_lat = 0.8 + 0.4 * math.sin(t / 3.0)    # 0.4-1.2s latency
+            # 2. Reveal next generation if it's time
+            if current_gen <= max_gen and (now - last_gen_update > GEN_INTERVAL):
+                # Slice the graph up to current_gen
+                visible_nodes = [n for n in full_nodes if n["generation"] <= current_gen]
+                
+                # Reconstruct valid edges for visible nodes
+                visible_fps = set(n["fingerprint"] for n in visible_nodes)
+                visible_edges = {}
+                for p, children in full_edges.items():
+                    if p in visible_fps:
+                        valid_kids = [c for c in children if c in visible_fps]
+                        if valid_kids:
+                            visible_edges[p] = valid_kids
+                
+                # Slice timeline
+                visible_timeline = full_timeline[:current_gen+1]
+                
+                write_evolution_file(visible_nodes, visible_edges, visible_timeline)
+                print(f"   ✨ Revealed Generation {current_gen} ({len(visible_nodes)} nodes total)")
+                
+                current_gen += 1
+                last_gen_update = now
             
-            for island in range(NUM_ISLANDS):
-                # Randomize per island
-                noise = random.uniform(0.8, 1.2)
-                eps = base_eps * noise / NUM_ISLANDS
-                lat = base_lat * noise
-                
-                # Queue buildup
-                q_ready = int(50 + 30 * math.sin(t / 10.0) + random.randint(-5, 5))
-                
-                snap = {
-                    "timestamp": time.time(),
-                    "eval_rate_eps": eps,
-                    "mutation_rate_mps": eps * 0.8,
-                    "inflight_requests": int(eps * 2),
-                    "concurrency_limit": 64,
-                    "queue_ready": q_ready,
-                    "queue_mutation": int(q_ready / 2),
-                    "queue_replay": random.randint(0, 5),
-                    "straggler_count": random.randint(0, 2),
-                    "latency_p50": lat,
-                    "latency_p95": lat * 2.5,
-                    "error_rate": 0.01 if random.random() > 0.9 else 0.0,
-                    "run_id": RUN_ID,
-                    "island_id": island
-                }
-                
-                path = TELEMETRY_DIR / f"telemetry_{RUN_ID}_{island}.json"
-                with open(path, "w") as f:
-                    json.dump(snap, f)
+            # 3. Keep telemetry alive
+            update_telemetry(t)
             
             time.sleep(0.25)
             
     except KeyboardInterrupt:
         print("\n🛑 Simulation stopped.")
-
-def main():
-    setup_dirs()
-    nodes, edges, timeline = generate_graph()
-    write_evolution_file(nodes, edges, timeline)
-    simulate_telemetry_loop()
 
 if __name__ == "__main__":
     main()
