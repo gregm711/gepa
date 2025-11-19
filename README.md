@@ -342,6 +342,8 @@ Each worker mounts the same cache/log directories (see the Modal docs above) and
 
 Set `TURBOGEPA_CONTROL_PATH` (or pass `--control-dir`) to a shared directory on that volume so workers can drop `stop.json` and heartbeat files there. The first worker that hits the north-star target writes the stop file and everyone else exits as soon as they see it. Use `TURBOGEPA_RUN_ID`/`--run-id` to share a run identifier across processes so the control files stay scoped to a single run.
 
+Need a turnkey Modal deployment? See `examples/modal_turbo_aime.py` for a distributed benchmark that mounts a Modal Volume, forwards OpenRouter secrets, and orchestrates workers via `turbo-gepa-worker`.
+
 ### Tooling & Debugging Helpers
 
 - **Live Visualization Dashboard**: Monitor your run in real-time with a rich UI.
@@ -1020,4 +1022,3 @@ TurboGEPA's contributions are limited to **performance engineering**:
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=Studio-Intrinsic/turbo-gepa&type=date&legend=top-left)](https://www.star-history.com/#Studio-Intrinsic/turbo-gepa&type=date&legend=top-left)
-Need a turnkey Modal deployment? See `examples/modal_turbo_aime.py` for a distributed benchmark that mounts a Modal Volume, forwards OpenRouter secrets, and orchestrates workers via `turbo-gepa-worker`.
