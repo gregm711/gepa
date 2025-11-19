@@ -401,13 +401,17 @@
 
                 const fetchData = async () => {
                     try {
-                        // 1. Get Active Run ID if not set
-                        if (!activeRunId.value) {
-                            const statusRes = await fetch('/api/status');
-                            const statusData = await statusRes.json();
-                            if (statusData.active_run_id) {
-                                activeRunId.value = statusData.active_run_id;
-                            }
+                        // 1. Get Active Run ID
+                        const statusRes = await fetch('/api/status');
+                        const statusData = await statusRes.json();
+                        
+                        // Update ID if changed (e.g., new mock run started)
+                        if (statusData.active_run_id && statusData.active_run_id !== activeRunId.value) {
+                            activeRunId.value = statusData.active_run_id;
+                            // Reset history for clean charts on new run
+                            telemetryHistory.value = [];
+                            // Reset graph
+                            if(cy) cy.elements().remove();
                         }
 
                         if (!activeRunId.value) return;
@@ -428,6 +432,10 @@
                             
                             // Push to history for charts
                             telemetryHistory.value.push(latestTelem);
+                            // Keep history bounded to avoid memory leak if running long
+                            if (telemetryHistory.value.length > 300) {
+                                telemetryHistory.value.shift();
+                            }
                             // Pass evolution timeline if available
                             updateCharts(telemetryHistory.value, data.evolution?.timeline);
                         } else {
