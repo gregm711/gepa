@@ -317,7 +317,8 @@ class Orchestrator:
                     queue_ready=queue_ready,
                     queue_mutation=queue_mutation,
                     queue_replay=queue_replay,
-                    stragglers=stragglers
+                    straggler_count=stragglers,
+                    cost=self.metrics.total_cost_usd
                 )
                 self._telemetry.publish(snap)
             except Exception:
@@ -1117,6 +1118,16 @@ class Orchestrator:
             self._retire_replay_workers(current - target)
             self._replay_worker_cooldown = now
 
+    def _resolve_evo_dir(self) -> str:
+        """Resolve the evolution directory, handling island subdirectories."""
+        log_path = os.path.abspath(self.config.log_path)
+        parent = os.path.dirname(log_path)
+        if os.path.basename(log_path).startswith("island_"):
+            # .turbo_gepa/logs/island_0 -> .turbo_gepa/evolution
+            return os.path.join(os.path.dirname(parent), "evolution")
+        # .turbo_gepa/logs -> .turbo_gepa/evolution
+        return os.path.join(parent, "evolution")
+
     async def run(
         self,
         seeds: Sequence[Candidate],
@@ -1162,7 +1173,7 @@ class Orchestrator:
 
         # Write evolution pointer immediately so dashboards can connect
         try:
-            evo_dir = os.path.abspath(os.path.join(self.config.log_path, "..", "evolution"))
+            evo_dir = self._resolve_evo_dir()
             os.makedirs(evo_dir, exist_ok=True)
             cur = os.path.join(evo_dir, "current.json")
             with open(cur + ".tmp", "w", encoding="utf-8") as fcur:
@@ -1660,7 +1671,7 @@ class Orchestrator:
         if not force and (now - self._evo_last_persist) < min_interval:
             return
 
-        evo_dir = os.path.abspath(os.path.join(self.config.log_path, "..", "evolution"))
+        evo_dir = self._resolve_evo_dir()
         os.makedirs(evo_dir, exist_ok=True)
 
         # Pointer to current run for the live UI
@@ -1717,7 +1728,7 @@ class Orchestrator:
         This ensures the live dashboard shows the OG seed node before the first
         evaluation completes (useful for slow models).</n+        """
         try:
-            dir_path = evo_dir or os.path.abspath(os.path.join(self.config.log_path, "..", "evolution"))
+            dir_path = evo_dir or self._resolve_evo_dir()
             os.makedirs(dir_path, exist_ok=True)
             # Build a minimal lineage with seeds
             lineage: list[dict[str, object]] = []
@@ -1786,7 +1797,7 @@ class Orchestrator:
         import time
 
         now = time.time()
-        evo_dir = os.path.abspath(os.path.join(self.config.log_path, "..", "evolution"))
+        evo_dir = self._resolve_evo_dir()
         os.makedirs(evo_dir, exist_ok=True)
 
         evo_stats = self.evolution_snapshot(include_edges=True)
@@ -2587,38 +2598,20 @@ class Orchestrator:
         return batch
 
     def _get_best_quality_from_full_shard(self) -> float:
-        """Get best quality from candidates evaluated on the longest/full shard only.
-
-        This ensures displayed quality represents performance on the full dataset,
-        not partial shards which may give inflated scores due to overfitting.
-
-        Falls back to best quality from ANY shard if no full-shard evaluations
-        exist yet (e.g., during seed baseline evaluation).
-        """
-        pareto = self.archive.pareto_entries()
-        if not pareto:
-            return 0.0
-
-        full_shard = self._runtime_shards[-1]  # Longest shard (e.g., 1.0 = 100%)
-        tolerance = 1e-6
-
-        # Try to get quality from full-shard evaluations first
-        full_shard_quality = 0.0
-        has_full_shard = False
-        for entry in pareto:
-            shard_fraction = entry.result.shard_fraction
-            if shard_fraction is not None and abs(shard_fraction - full_shard) <= tolerance:
-                has_full_shard = True
-                quality = entry.result.objectives.get(self.config.promote_objective, 0.0)
-                full_shard_quality = max(full_shard_quality, quality)
-
-        if has_full_shard:
-            return full_shard_quality
-
-        # Fallback: Return best quality from ANY shard
-        # This ensures we always show something meaningful during early optimization
-        best_quality = max(entry.result.objectives.get(self.config.promote_objective, 0.0) for entry in pareto)
-        return best_quality
+        target_shard = self.config.target_shard_fraction or self._runtime_shards[-1]
+        tol = 1e-6
+        best = 0.0
+        promote_obj = self.config.promote_objective
+        
+        # Scan latest results instead of Pareto to catch non-optimal but high-quality runs
+        for result in self.latest_results.values():
+            sf = result.shard_fraction if result.shard_fraction is not None else 0.0
+            if abs(sf - target_shard) <= tol:
+                q = result.objectives.get(promote_obj, 0.0)
+                if q > best:
+                    best = float(q)
+        
+        return best
 
     def _get_generation(self, candidate: Candidate) -> int | None:
         meta = candidate.meta if isinstance(candidate.meta, dict) else {}

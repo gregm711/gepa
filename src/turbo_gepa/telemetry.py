@@ -43,6 +43,7 @@ class TelemetrySnapshot:
     run_id: str = "unknown"
     island_id: int = 0
     status: str = "running" # running, paused, stopping, etc.
+    total_cost_usd: float = 0.0
 
 
 class TelemetryCollector:
@@ -97,7 +98,8 @@ class TelemetryCollector:
                  queue_ready: int,
                  queue_mutation: int,
                  queue_replay: int,
-                 stragglers: int) -> TelemetrySnapshot:
+                 straggler_count: int,
+                 cost: float = 0.0) -> TelemetrySnapshot:
 
         now = time.time()
         delta = max(0.1, now - self._last_flush)
@@ -137,7 +139,8 @@ class TelemetryCollector:
             latency_p95=p95,
             error_rate=err_rate,
             run_id=self.run_id,
-            island_id=self.island_id
+            island_id=self.island_id,
+            total_cost_usd=cost
         )
 
         # Update baselines for next rate calc
