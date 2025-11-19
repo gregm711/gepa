@@ -40,7 +40,7 @@ print()
 # Configure TurboGEPA
 config = Config(
     eval_concurrency=4,  # Run 4 evaluations in parallel
-    n_islands=1,  # Single island (simpler for demo)
+    n_islands=2,  # Single island (simpler for demo)
     shards=(0.6, 1.0),  # Two-rung ASHA: 60% → 100% of dataset
     batch_size=4,  # Batch size for mutations
     max_mutations_per_round=4,  # Generate 4 mutations per round

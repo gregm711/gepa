@@ -51,29 +51,31 @@ def build_progress_snapshot(orchestrator: Orchestrator) -> ProgressSnapshot:
     """Collect a ProgressSnapshot from the orchestrator."""
 
     pareto_entries = orchestrator.archive.pareto_entries()
-    best_quality = 0.0
-    best_shard = 0.0
+    
+    # Use helper to get true full-shard best quality (scanning all results, not just Pareto)
+    best_quality = orchestrator._get_best_quality_from_full_shard()
+    
+    # If no full-shard results yet, allow fallback to best observed metric 
+    # ONLY if no target quality is set (soft mode). For benchmarks, stay strict at 0.0.
+    if best_quality <= 0.0 and orchestrator.config.target_quality is None:
+         best_quality = orchestrator.metrics.best_quality
+
+    best_shard = orchestrator.metrics.best_shard_fraction
     snippet: str | None = None
-    if pareto_entries:
-        promote_obj = orchestrator.config.promote_objective
-        full_shard = orchestrator._runtime_shards[-1] if orchestrator._runtime_shards else 1.0
-        tolerance = 1e-6
-        full_entries = [
-            entry
-            for entry in pareto_entries
-            if entry.result.shard_fraction is not None
-            and abs(entry.result.shard_fraction - full_shard) <= tolerance
-        ]
-        preferred = full_entries or pareto_entries
-        best_entry = max(
-            preferred,
-            key=lambda entry: (
-                entry.result.objectives.get(promote_obj, 0.0),
-                entry.result.objectives.get("neg_cost", float("-inf")),
-            ),
-        )
-        best_quality = best_entry.result.objectives.get(promote_obj, 0.0)
-        best_shard = best_entry.result.shard_fraction or 0.0
+    
+    if orchestrator._north_star_prompt:
+        snippet = orchestrator._north_star_prompt
+    elif pareto_entries:
+        # Fallback to best Pareto entry for snippet
+        best_entry = pareto_entries[0] # Default
+        try:
+            promote_obj = orchestrator.config.promote_objective
+            best_entry = max(
+                pareto_entries,
+                key=lambda entry: entry.result.objectives.get(promote_obj, 0.0)
+            )
+        except Exception:
+            pass
         snippet = _truncate_prompt(best_entry.candidate.text)
 
     target = orchestrator.config.target_quality

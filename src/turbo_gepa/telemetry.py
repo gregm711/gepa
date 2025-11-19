@@ -43,6 +43,7 @@ class TelemetrySnapshot:
     run_id: str = "unknown"
     island_id: int = 0
     status: str = "running" # running, paused, stopping, etc.
+    total_cost_usd: float = 0.0
 
 
 class TelemetryCollector:
@@ -65,6 +66,8 @@ class TelemetryCollector:
         self._last_flush = time.time()
         self._last_eval_count = 0
         self._last_mutation_count = 0
+        self._eval_rate_ema = 0.0
+        self._mutation_rate_ema = 0.0
 
         # Latency tracking
         self._latencies: list[float] = []
@@ -81,8 +84,8 @@ class TelemetryCollector:
     def record_eval_completion(self, latency: float, error: bool = False):
         self._evals_completed += 1
         self._latencies.append(latency)
-        if len(self._latencies) > 1000: # Keep window manageable
-            self._latencies = self._latencies[-1000:]
+        if len(self._latencies) > 20: # Keep window small for responsiveness
+            self._latencies.pop(0)
         if error:
             self._errors += 1
 
@@ -95,14 +98,18 @@ class TelemetryCollector:
                  queue_ready: int,
                  queue_mutation: int,
                  queue_replay: int,
-                 stragglers: int) -> TelemetrySnapshot:
+                 straggler_count: int,
+                 cost: float = 0.0) -> TelemetrySnapshot:
 
         now = time.time()
         delta = max(0.1, now - self._last_flush)
 
-        # Calculate rates
-        eval_rate = (self._evals_completed - self._last_eval_count) / delta
-        mut_rate = (self._mutations_generated - self._last_mutation_count) / delta
+        # Calculate rates with EMA smoothing
+        raw_eval_rate = (self._evals_completed - self._last_eval_count) / delta
+        raw_mut_rate = (self._mutations_generated - self._last_mutation_count) / delta
+        
+        self._eval_rate_ema = 0.2 * raw_eval_rate + 0.8 * self._eval_rate_ema
+        self._mutation_rate_ema = 0.2 * raw_mut_rate + 0.8 * self._mutation_rate_ema
 
         # Calculate latency stats
         if self._latencies:
@@ -119,20 +126,21 @@ class TelemetryCollector:
 
         snap = TelemetrySnapshot(
             timestamp=now,
-            eval_rate_eps=eval_rate,
-            mutation_rate_mps=mut_rate,
+            eval_rate_eps=self._eval_rate_ema,
+            mutation_rate_mps=self._mutation_rate_ema,
             inflight_requests=inflight,
             concurrency_limit=limit,
             semaphore_utilization=inflight / max(1, limit),
             queue_ready=queue_ready,
             queue_mutation=queue_mutation,
             queue_replay=queue_replay,
-            straggler_count=stragglers,
+            straggler_count=straggler_count,
             latency_p50=p50,
             latency_p95=p95,
             error_rate=err_rate,
             run_id=self.run_id,
-            island_id=self.island_id
+            island_id=self.island_id,
+            total_cost_usd=cost
         )
 
         # Update baselines for next rate calc

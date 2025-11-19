@@ -100,6 +100,10 @@
                     <span class="text-gray-500 text-[10px] uppercase">Runtime</span>
                     <span class="text-white">{{ runtime }}</span>
                 </div>
+                <div class="flex flex-col items-end">
+                    <span class="text-gray-500 text-[10px] uppercase">Total Cost</span>
+                    <span class="text-green-400 font-bold">${{ totalCost.toFixed(2) }}</span>
+                </div>
             </div>
         </header>
 
@@ -214,6 +218,7 @@
         createApp({
             setup() {
                 const activeRunId = ref(null);
+                const runStartTime = ref(null);
                 const isConnected = ref(false);
                 const telemetryHistory = ref([]);
                 const evolutionData = ref(null);
@@ -223,6 +228,7 @@
                 const totalEvals = ref(0);
                 const bestQuality = ref(0);
                 const runtime = ref("00:00");
+                const totalCost = ref(0.0);
                 const nodeCount = ref(0);
                 const maxGeneration = ref(0);
                 
@@ -268,11 +274,13 @@
                     chartQuality = echarts.init(document.getElementById('chart-quality'));
                     chartQuality.setOption({
                         ...commonOption,
+                        yAxis: { type: 'value', show: true, min: 0, max: 100, splitLine: { show: false } },
                         tooltip: { show: true, trigger: 'axis', formatter: '{b}s: {c}%' },
                         series: [{ 
                             type: 'line',
-                            smooth: true,
-                            showSymbol: false,
+                            smooth: false,
+                            showSymbol: true,
+                            symbolSize: 4,
                             areaStyle: { opacity: 0.2, color: 'rgba(0, 240, 255, 0.2)' },
                             lineStyle: { width: 2, color: '#00F0FF' }
                         }]
@@ -288,7 +296,7 @@
                                 style: {
                                     'background-color': '#1a1a1a',
                                     'border-width': 2,
-                                    'border-color': '#444',
+                                    'border-color': 'data(islandColor)', // Use dynamic island color
                                     'label': 'data(label)',
                                     'color': '#888',
                                     'font-size': 10,
@@ -300,7 +308,7 @@
                             },
                             {
                                 selector: 'node[quality > 0.8]',
-                                style: { 'border-color': '#00F0FF', 'background-color': '#003333' }
+                                style: { 'background-color': '#003333', 'border-width': 3 } // Keep island border but darker bg
                             },
                             {
                                 selector: 'node:selected',
@@ -351,6 +359,8 @@
                     }
                 };
 
+                const isFirstLayout = ref(true);
+
                 const updateGraph = (data) => {
                     if (!data || !data.lineage) return;
                     
@@ -364,11 +374,16 @@
                         
                         let label = item.generation === 0 ? "SEED" : `G${item.generation}`;
                         
+                        // Color code by island
+                        const islandColors = ['#3b82f6', '#8b5cf6', '#10b981', '#f59e0b'];
+                        const color = islandColors[(item.current_island || 0) % islandColors.length];
+
                         nodes.push({
                             data: {
                                 id: item.fingerprint,
                                 label: label,
                                 quality: item.quality || 0,
+                                islandColor: color,
                                 raw: item
                             }
                         });
@@ -388,10 +403,19 @@
                     if (nodes.length > 0 || edges.length > 0) {
                         cy.add([...nodes, ...edges]);
                         
-                        // Only re-run layout if significant changes or first load
-                        if (nodes.length > 0) {
-                            cy.layout({ name: 'dagre', rankDir: 'LR', animate: true, animationDuration: 500 }).run();
-                        }
+                        // Run layout
+                        // Only fit/animate fully on first load. subsequent updates just place new nodes.
+                        const layoutConfig = {
+                            name: 'dagre',
+                            rankDir: 'LR',
+                            animate: true,
+                            animationDuration: 500,
+                            fit: isFirstLayout.value, // Only fit on first load
+                            padding: 50
+                        };
+                        
+                        cy.layout(layoutConfig).run();
+                        isFirstLayout.value = false;
                         
                         // Stats update
                         nodeCount.value = data.lineage.length;
@@ -401,13 +425,18 @@
 
                 const fetchData = async () => {
                     try {
-                        // 1. Get Active Run ID if not set
-                        if (!activeRunId.value) {
-                            const statusRes = await fetch('/api/status');
-                            const statusData = await statusRes.json();
-                            if (statusData.active_run_id) {
-                                activeRunId.value = statusData.active_run_id;
-                            }
+                        // 1. Get Active Run ID
+                        const statusRes = await fetch('/api/status');
+                        const statusData = await statusRes.json();
+                        
+                        // Update ID if changed (e.g., new mock run started)
+                        if (statusData.active_run_id && statusData.active_run_id !== activeRunId.value) {
+                            activeRunId.value = statusData.active_run_id;
+                            runStartTime.value = null;
+                            // Reset history for clean charts on new run
+                            telemetryHistory.value = [];
+                            // Reset graph
+                            if(cy) cy.elements().remove();
                         }
 
                         if (!activeRunId.value) return;
@@ -417,17 +446,60 @@
                         const data = await res.json();
                         isConnected.value = true;
 
-                        // Update Telemetry
-                        const latestTelem = data.telemetry?.[data.telemetry.length - 1];
-                        if (latestTelem) {
-                            currentEPS.value = latestTelem.eval_rate_eps || 0;
-                            currentLatency.value = latestTelem.latency_p95 || 0;
-                            queueDepth.value = (latestTelem.queue_ready || 0) + (latestTelem.queue_mutation || 0);
-                            inflightCount.value = latestTelem.inflight_requests || 0;
-                            concurrencyLimit.value = latestTelem.concurrency_limit || 0;
+                        // Update Telemetry (Aggregate across all islands)
+                        const telemetryList = data.telemetry || [];
+                        if (telemetryList.length > 0) {
+                            // Initialize aggregation
+                            let aggEPS = 0;
+                            let aggLatency = 0;
+                            let aggQueue = 0;
+                            let aggInflight = 0;
+                            let aggLimit = 0;
+                            let aggCost = 0;
+                            let latestTs = 0;
+
+                            // Aggregate
+                            for (const t of telemetryList) {
+                                aggEPS += (t.eval_rate_eps || 0);
+                                aggLatency = Math.max(aggLatency, t.latency_p95 || 0);
+                                aggQueue += (t.queue_ready || 0) + (t.queue_mutation || 0);
+                                aggInflight += (t.inflight_requests || 0);
+                                aggLimit += (t.concurrency_limit || 0);
+                                aggCost += (t.total_cost_usd || 0); // Sum cost across islands? No, Orchestrator passes global cost?
+                                // Actually Orchestrator.metrics is global per orchestrator.
+                                // If multi-island, each Orchestrator has its own metrics. So we SUM costs.
+                                latestTs = Math.max(latestTs, t.timestamp);
+                            }
+
+                            // Update display refs
+                            currentEPS.value = aggEPS;
+                            currentLatency.value = aggLatency;
+                            queueDepth.value = aggQueue;
+                            inflightCount.value = aggInflight;
+                            concurrencyLimit.value = aggLimit;
+                            
+                            // Use latest available cost if not in telemetry
+                            // Note: totalCost is usually cumulative
+                            totalCost.value = aggCost;
+
+                            // Initialize start time if needed
+                            if (!runStartTime.value) {
+                                runStartTime.value = latestTs;
+                            }
+                            
+                            // Create aggregated history point for charts
+                            const aggPoint = {
+                                timestamp: latestTs,
+                                eval_rate_eps: aggEPS,
+                                latency_p95: aggLatency
+                            };
                             
                             // Push to history for charts
-                            telemetryHistory.value.push(latestTelem);
+                            telemetryHistory.value.push(aggPoint);
+                            // Keep history bounded to avoid memory leak if running long
+                            if (telemetryHistory.value.length > 300) {
+                                telemetryHistory.value.shift();
+                            }
                             // Pass evolution timeline if available
                             updateCharts(telemetryHistory.value, data.evolution?.timeline);
                         } else {
@@ -441,9 +513,13 @@
                             const meta = data.evolution.run_metadata || {};
                             totalEvals.value = meta.evaluations || 0;
                             bestQuality.value = meta.best_quality || 0;
+                            // Fallback cost from evolution snapshot if telemetry is empty
+                            if (totalCost.value === 0.0) {
+                                totalCost.value = data.evolution.metrics?.total_cost_usd || 0.0;
+                            }
                             
                             // Runtime fallback if no telemetry
-                            if (!latestTelem && data.evolution.timeline?.length) {
+                            if (telemetryList.length === 0 && data.evolution.timeline?.length) {
                                 const lastSnap = data.evolution.timeline[data.evolution.timeline.length - 1];
                                 const diff = lastSnap.elapsed || 0;
                                 const mins = Math.floor(diff / 60).toString().padStart(2, '0');
@@ -455,12 +531,16 @@
                         }
                         
                         // Calc runtime from telemetry if available
-                        if (latestTelem) {
-                            const start = telemetryHistory.value[0]?.timestamp || latestTelem.timestamp;
-                            const diff = latestTelem.timestamp - start;
-                            const mins = Math.floor(diff / 60).toString().padStart(2, '0');
-                            const secs = Math.floor(diff % 60).toString().padStart(2, '0');
-                            runtime.value = `${mins}:${secs}`;
+                        if (telemetryList.length > 0 && runStartTime.value) {
+                            // Use the timestamp from the last aggregated point (latestTs)
+                            // But latestTs was local to the if block. Access via history.
+                            const lastPoint = telemetryHistory.value[telemetryHistory.value.length - 1];
+                            if (lastPoint) {
+                                const diff = lastPoint.timestamp - runStartTime.value;
+                                const mins = Math.floor(diff / 60).toString().padStart(2, '0');
+                                const secs = Math.floor(diff % 60).toString().padStart(2, '0');
+                                runtime.value = `${mins}:${secs}`;
+                            }
                         }
 
                     } catch (e) {
@@ -476,8 +556,8 @@
                 });
 
                 return {
-                    activeRunId, isConnected,
-                    totalEvals, bestQuality, runtime, nodeCount, maxGeneration,
+                    activeRunId, runStartTime, isConnected,
+                    totalEvals, bestQuality, runtime, totalCost, nodeCount, maxGeneration,
                     currentEPS, currentLatency, queueDepth, inflightCount, concurrencyLimit,
                     selectedNode
                 };
