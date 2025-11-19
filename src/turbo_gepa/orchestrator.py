@@ -1627,6 +1627,19 @@ class Orchestrator:
             # Non-fatal: summary is a convenience artifact
             pass
 
+        # Generate and save detailed report card
+        try:
+            from turbo_gepa.logging.report import generate_markdown_report
+            report_content = generate_markdown_report(self)
+            report_path = os.path.join(self.config.log_path, f"report_{self._run_id}.md")
+            os.makedirs(os.path.dirname(report_path), exist_ok=True)
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(report_content)
+            if self.show_progress:
+                self.logger.log(f"📝 Run report saved to: {report_path}")
+        except Exception:
+            pass
+
         # Clear state only if we reached completion (not if stopped early)
         completed = (max_rounds is not None and window_id >= max_rounds) or (
             max_evaluations is not None and self.evaluations_run >= max_evaluations
