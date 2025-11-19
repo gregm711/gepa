@@ -8,13 +8,13 @@ usable across processes or Modal workers sharing a volume.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence, TYPE_CHECKING
-import copy
+from typing import TYPE_CHECKING, Protocol, Sequence
 
 if TYPE_CHECKING:  # pragma: no cover
     from turbo_gepa.islands import IslandContext
@@ -67,7 +67,7 @@ class NullMigrationBackend(MigrationBackend):
 class LocalQueueMigrationBackend(MigrationBackend):
     """Wraps IslandContext queues for legacy in-process behavior."""
 
-    context: "IslandContext"
+    context: IslandContext
 
     def publish(self, from_island: int, candidates: Sequence[Candidate]) -> None:
         if not candidates:

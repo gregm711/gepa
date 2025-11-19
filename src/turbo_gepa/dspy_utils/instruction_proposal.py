@@ -115,7 +115,7 @@ IMPORTANT:
             Extracted instruction text, or empty string if no valid prompt found
         """
         # Extract from <PROMPT>...</PROMPT> tags
-        prompt_pattern = r'<PROMPT>\s*(.*?)\s*</PROMPT>'
+        prompt_pattern = r"<PROMPT>\s*(.*?)\s*</PROMPT>"
         matches = re.findall(prompt_pattern, lm_output, re.DOTALL | re.IGNORECASE)
 
         if matches:
@@ -128,7 +128,7 @@ IMPORTANT:
                     continue
                 if cleaned.startswith("###"):
                     continue
-                if len(cleaned) < 100 and re.match(r'^[#\s\d]+$', cleaned):
+                if len(cleaned) < 100 and re.match(r"^[#\s\d]+$", cleaned):
                     continue
 
                 return cleaned

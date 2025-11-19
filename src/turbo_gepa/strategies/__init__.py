@@ -269,7 +269,7 @@ def build_interleaved_prompt(
 Generate {num_mutations} new prompt variants that explicitly teach the student to alternate between <think> (private) and <answer> (public) blocks.
 Rules:
 - Each <think> block must handle one short reasoning step and stay hidden.
-- Each <answer> block must summarize only that step’s conclusion for the user.
+- Each <answer> block must summarize only that step's conclusion for the user.
 - The process continues step-by-step until a final <answer> presents ONLY the final solution.
 - Keep the original task intent, formatting requirements, and answer style intact.
 - Ensure the rewritten prompt clearly explains this alternating pattern and how to end with the final answer.

@@ -344,6 +344,14 @@ Set `TURBOGEPA_CONTROL_PATH` (or pass `--control-dir`) to a shared directory on 
 
 ### Tooling & Debugging Helpers
 
+- **Live Visualization Dashboard**: Monitor your run in real-time with a rich UI.
+  ```bash
+  # Local
+  python scripts/viz_server.py
+  
+  # Modal (remote)
+  modal serve scripts/modal_progress_server.py
+  ```
 - `run_turbo_validation(...)` in `examples/aime_benchmark_v2.py` – re-evaluate the best TurboGEPA prompt on a full train/val split with the task LLM only (no Turbo orchestration), to measure true full-dataset quality.
 - `scripts/analyze_turbo_run.py` – inspect a previous TurboGEPA run from `.turbo_gepa/metrics` (time-to-target, total evaluations, LLM calls, mutation counts, best observed shard/quality).
 - `turbo_gepa.distributed.run_local_multiworker` – run multiple TurboGEPA workers as local processes sharing a cache/log/control directory; see `examples/local_multiworker_bench.py` for a concrete 4-worker AIME benchmark.

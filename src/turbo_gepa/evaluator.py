@@ -9,10 +9,9 @@ we can run quickly in constrained environments.
 from __future__ import annotations
 
 import asyncio
-import math
-from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Sequence, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Sequence
 
-from turbo_gepa.logging.logger import LoggerProtocol, StdOutLogger, LogLevel
+from turbo_gepa.logging.logger import LoggerProtocol, LogLevel, StdOutLogger
 
 from .cache import DiskCache
 from .interfaces import Candidate, EvalResult
@@ -168,7 +167,7 @@ class AsyncEvaluator:
         early_stop_reason: str | None = None
         straggler_detached_total = 0
         candidate_fp = candidate.fingerprint
-        deliver_flags: dict[str, bool] = {ex_id: True for ex_id in example_ids}
+        deliver_flags: dict[str, bool] = dict.fromkeys(example_ids, True)
         loop = asyncio.get_running_loop()
         latency_ema: dict[str, float] = {}
         latency_samples: dict[str, int] = {}
@@ -460,7 +459,7 @@ class AsyncEvaluator:
 
                 if show_progress:
                     self.logger.log(f"Progress: {completed}/{total} examples ({completed / max(total, 1) * 100:.0f}%)")
-            except asyncio.TimeoutError as e:
+            except asyncio.TimeoutError:
                 self._inflight_examples = max(0, self._inflight_examples - 1)
                 timeout_msg = (
                     f"⚠️  Evaluation timed out for example {example_id} "
@@ -576,7 +575,7 @@ class AsyncEvaluator:
                 else:
                     threshold = 0.6 * last_threshold + 0.4 * threshold_raw
                 last_threshold = threshold
-                # Add a small slack so equal-times don’t trigger detaches due to rounding jitter
+                # Add a small slack so equal-times don't trigger detaches due to rounding jitter
                 detach_margin = max(0.5, 0.10 * threshold)
                 now = time.time()
 

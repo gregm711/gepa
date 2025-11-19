@@ -8,17 +8,17 @@ into orchestrator entrypoints or by subclassing ``Config``.
 
 from __future__ import annotations
 
-import os
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from turbo_gepa.scoring import SCORE_KEY, ScoringFn, maximize_metric
 from turbo_gepa.stop_governor import StopGovernorConfig
 from turbo_gepa.strategies import (
     ReflectionStrategy,
     resolve_reflection_strategy_names,
 )
-from turbo_gepa.scoring import ScoringFn, maximize_metric, SCORE_KEY
 
 
 def _default_variance_tolerance(shards: Sequence[float]) -> dict[float, float]:
@@ -170,7 +170,7 @@ def adaptive_shards(
     # Determine how many rungs we want (including the final full-shard rung)
     span = math.log(max(1.01, 1.0 / min_fraction), reduction_factor)
     raw_rungs = span * ladder_density
-    target_rungs = int(math.ceil(raw_rungs)) + 1  # +1 to include the final full-shard rung
+    target_rungs = math.ceil(raw_rungs) + 1  # +1 to include the final full-shard rung
     target_rungs = max(2, min(6, target_rungs))
 
     # Convert target rung count into a geometric ladder that ends at full coverage
@@ -188,7 +188,7 @@ def adaptive_shards(
     # Convert to sample counts to avoid tiny fractions on small datasets
     counts: list[int] = []
     for frac in fractions:
-        count = int(round(frac * dataset_size))
+        count = round(frac * dataset_size)
         count = min(dataset_size - 1, max(1, count))
         counts.append(count)
 
@@ -259,6 +259,10 @@ class Config:
     # Always enabled - monitors hypervolume, quality, stability, ROI
     stop_governor_config: StopGovernorConfig = field(default_factory=StopGovernorConfig)
 
+    # Cost-aware stopping: Max tokens to spend without improvement before stopping
+    cost_patience_tokens: int | None = None
+    cost_patience_dollars: float | None = None
+
     reflection_batch_size: int = 6
     max_tokens: int = 2048
     migration_period: int = 1  # Migrate every evaluation batch by default
@@ -278,6 +282,7 @@ class Config:
     target_shard_fraction: float | None = 1.0  # Rung fraction that counts as "full" for turbo metric
     eval_timeout_seconds: float | None = 120.0  # Max time to wait for a single LLM evaluation
     max_optimization_time_seconds: float | None = None  # Global timeout - stop optimization after this many seconds
+    max_total_cost_dollars: float | None = None  # Global budget cap - stop optimization if total cost exceeds this amount (USD)
     reflection_strategy_names: tuple[str, ...] | None = None  # Default to all known strategies
     reflection_strategies: tuple[ReflectionStrategy, ...] | None = None
     max_final_shard_inflight: int | None = None  # If None, derive cap from eval_concurrency
@@ -391,7 +396,7 @@ class Config:
 
         if self.replay_workers is None:
             # Default: dedicate ~10% of evaluator concurrency, at least 1
-            self.replay_workers = max(1, int(round(self.eval_concurrency * 0.1)))
+            self.replay_workers = max(1, round(self.eval_concurrency * 0.1))
         else:
             self.replay_workers = max(0, int(self.replay_workers))
         if self.replay_concurrency is None:
@@ -422,7 +427,7 @@ class Config:
         self.verification_speed_bias = speed
         # Use a non-linear mapping so higher values of the dial have a
         # disproportionately stronger effect. This keeps low/medium settings
-        # close to the current behaviour but makes 0.8–1.0 meaningfully more
+        # close to the current behaviour but makes 0.8-1.0 meaningfully more
         # aggressive.
         fast = speed**2.5
 
@@ -431,7 +436,7 @@ class Config:
 
         if self.min_samples_for_confidence is None:
             # Require many samples at slow end, very few at the fastest.
-            samples = int(round(_blend(30, 3)))
+            samples = round(_blend(30, 3))
             self.min_samples_for_confidence = max(1, samples)
 
         # Derive a global z-score (confidence margin) from the same dial.

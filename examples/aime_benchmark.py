@@ -23,7 +23,7 @@ PERFORMANCE OPTIMIZATIONS APPLIED (MAXIMIZED FOR SPEED):
 =========================================================
 
 1. AGGRESSIVE ADAPTIVE SHARDING (ASHA)
-   - 3-rung configuration: (0.05, 0.2, 1.0) - Very aggressive early pruning!
+   - 3-rung configuration: (0.05, 0.2, 1.0)4 - Very aggressive early pruning!
    - Evaluates on 5%, 20%, 100% of data progressively
    - Target: 50% promotion rate (optimal ASHA)
    - Automatically prunes ~75-80% of poor candidates in first rung!

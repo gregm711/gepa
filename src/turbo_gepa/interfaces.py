@@ -48,8 +48,8 @@ class Candidate:
             return value
 
         # Exclude result-related metadata from fingerprint (these change as candidate is evaluated)
-        RESULT_KEYS = {"quality", "quality_shard_fraction", "parent_objectives"}
-        identity_meta = {k: v for k, v in self.meta.items() if k not in RESULT_KEYS}
+        result_keys = {"quality", "quality_shard_fraction", "parent_objectives"}
+        identity_meta = {k: v for k, v in self.meta.items() if k not in result_keys}
 
         canonical = {
             "text": _normalize(self.text),

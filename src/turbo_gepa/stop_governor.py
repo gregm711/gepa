@@ -27,7 +27,8 @@ class EpochMetrics:
     best_cost: float  # negative tokens
     frontier_ids: set[str]
     total_tokens_spent: int
-
+    tokens_spent_this_epoch: int = 0
+    monetary_cost_spent_this_epoch: float = 0.0
 
 @dataclass
 class StopGovernorConfig:
@@ -64,7 +65,10 @@ class StopGovernorConfig:
 
     # Hard caps (always enforced)
     max_no_improvement_epochs: int = 12  # Doubled from 6 for more patience
-
+    # NEW: Max tokens to spend without *any* improvement before stopping (hard cap)
+    max_cost_no_improvement_tokens: int | None = None
+    # NEW: Max monetary cost to spend without improvement (hard cap)
+    max_monetary_cost_no_improvement: float | None = None
 
 class StopGovernor:
     """
@@ -90,7 +94,8 @@ class StopGovernor:
         # Hysteresis counter
         self.epochs_below_threshold: int = 0
         self.epochs_no_improvement: int = 0
-
+        self.tokens_spent_since_last_improvement: int = 0 # NEW: Tracks tokens since last improvement
+        self._monetary_cost_spent_since_last_improvement: float = 0.0  # NEW: Tracks cost since last improvement
         # Last best values
         self.last_best_quality: float = 0.0
         self.last_best_cost: float = float("-inf")
@@ -119,8 +124,12 @@ class StopGovernor:
             # Track improvement
             if delta_quality > self.config.tau_quality:
                 self.epochs_no_improvement = 0
+                self.tokens_spent_since_last_improvement = 0
+                self._monetary_cost_spent_since_last_improvement = 0.0
             else:
                 self.epochs_no_improvement += 1
+                self.tokens_spent_since_last_improvement += metrics.tokens_spent_this_epoch
+                self._monetary_cost_spent_since_last_improvement += metrics.monetary_cost_spent_this_epoch
 
         else:
             # First epoch - initialize
@@ -242,8 +251,19 @@ class StopGovernor:
         # Hysteresis stop: below threshold for H consecutive epochs
         hysteresis_stop = self.epochs_below_threshold >= self.config.hysteresis_window
 
-        should_stop = hard_stop or hysteresis_stop
+        # NEW: Hard cap based on tokens spent without improvement
+        token_cost_stop = (
+            self.config.max_cost_no_improvement_tokens is not None
+            and self.tokens_spent_since_last_improvement >= self.config.max_cost_no_improvement_tokens
+        )
+        # NEW: Hard cap based on monetary cost spent without improvement
+        money_cost_stop = (
+            self.config.max_monetary_cost_no_improvement is not None
+            and self._monetary_cost_spent_since_last_improvement >= self.config.max_monetary_cost_no_improvement
+        )
+        cost_hard_stop = token_cost_stop or money_cost_stop
 
+        should_stop = hard_stop or hysteresis_stop or cost_hard_stop
         debug_info = {
             "stop_score": stop_score,
             "signals": signals,
@@ -255,13 +275,17 @@ class StopGovernor:
         }
 
         if should_stop:
-            if hard_stop:
+            if cost_hard_stop:
+                if money_cost_stop:
+                    debug_info["reason"] = f"cost_patience_exhausted_(${self._monetary_cost_spent_since_last_improvement:.2f})"
+                else:
+                    debug_info["reason"] = f"cost_patience_exhausted_({self.tokens_spent_since_last_improvement}_tokens)"
+            elif hard_stop:
                 debug_info["reason"] = f"no_improvement_for_{self.epochs_no_improvement}_epochs"
             else:
                 debug_info["reason"] = (
                     f"score_below_{self.config.stop_threshold}_for_{self.epochs_below_threshold}_epochs"
                 )
-
         return should_stop, debug_info
 
     def _compute_jaccard(self, set1: set[str], set2: set[str]) -> float:

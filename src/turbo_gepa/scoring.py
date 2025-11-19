@@ -7,7 +7,6 @@ from typing import Callable, Mapping
 
 from .interfaces import Candidate, EvalResult
 
-
 SCORE_KEY = "_score"
 
 

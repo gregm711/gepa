@@ -8,9 +8,9 @@ examples identified via disagreement among top candidates.
 from __future__ import annotations
 
 import collections
+import hashlib
 import random
 from typing import Iterable, Sequence
-import hashlib
 
 
 class InstanceSampler:

@@ -134,7 +134,6 @@ class BudgetedScheduler:
 
         info = self._rung_generations[rung_idx]
         final_rung_index = len(self.shards) - 1
-        at_final_rung = rung_idx >= final_rung_index
         stagnant_gens = int(info["stagnant_generations"])
         improved_this_gen = bool(info["improvement_this_gen"])
         stagnant_evals = int(info.get("stagnant_evals", 0))
@@ -304,7 +303,7 @@ class BudgetedScheduler:
                 global_baseline = 0.5  # Conservative baseline
                 parent_score_at_rung = (1 - alpha) * global_baseline + alpha * parent_final_score
                 logger.debug(
-                    "   📉 Using shrinkage: parent@final=%.1f%% → parent@rung_%d≈%.1f%% (α=%.2f)",
+                    "   📉 Using shrinkage: parent@final=%.1f%% → parent@rung_%d≈%.1f%% (a=%.2f)",
                     parent_final_score * 100,
                     idx,
                     parent_score_at_rung * 100,

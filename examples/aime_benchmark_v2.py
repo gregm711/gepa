@@ -453,7 +453,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--turbo-show-progress", action="store_true")
     parser.add_argument("--turbo-n-islands", type=int, default=1)
     parser.add_argument("--turbo-verification-speed-bias", type=float, default=None)
-    parser.add_argument("--open-ui", action="store_true", help="Open live evolution UI (http://localhost:8080/scripts/evolution_live.html)")
+    parser.add_argument("--open-ui", action="store_true", help="Show instructions for the live evolution dashboard")
     parser.add_argument(
         "--turbo-strategies",
         nargs="+",
@@ -486,13 +486,9 @@ def main() -> None:
         )
 
     if args.mode in {"turbo", "both"}:
-        # Optionally open the live UI with a simple local server
         if args.open_ui:
-            try:
-                subprocess.Popen(["python", "-m", "http.server", "8080"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                webbrowser.open("http://localhost:8080/scripts/evolution_live_v2.html")
-            except Exception:
-                pass
+            print("\n🚀 For live visualization, run:\n   python scripts/viz_server.py\n")
+            
         _reset_turbo_cache()
         results["TurboGEPA"] = run_turbo(
             trainset,

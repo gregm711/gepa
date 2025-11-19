@@ -17,14 +17,13 @@ import os
 import random
 import time
 import uuid
-from collections import defaultdict, deque, OrderedDict
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import NormalDist
 from typing import Any, Callable, Iterable, Sequence
 
 from turbo_gepa.logging import build_progress_snapshot
-from turbo_gepa.logging.logger import LogLevel, LoggerProtocol, StdOutLogger
+from turbo_gepa.logging.logger import LoggerProtocol, LogLevel, StdOutLogger
 
 from .archive import Archive, ArchiveEntry
 from .cache import DiskCache, candidate_key
@@ -33,12 +32,12 @@ from .evaluator import AsyncEvaluator
 from .interfaces import Candidate, EvalResult
 from .islands import IslandContext, integrate_in, migrate_out
 from .metrics import Metrics
+from .migrations import FileMigrationBackend, LocalQueueMigrationBackend, MigrationBackend, NullMigrationBackend
 from .mutator import Mutator
 from .sampler import InstanceSampler
-from .scoring import ScoringContext, SCORE_KEY
 from .scheduler import BudgetedScheduler, SchedulerConfig
+from .scoring import SCORE_KEY, ScoringContext
 from .stop_governor import EpochMetrics, StopGovernor, compute_hypervolume_2d
-from .migrations import MigrationBackend, NullMigrationBackend, LocalQueueMigrationBackend, FileMigrationBackend
 
 
 def _percentile(samples: Sequence[float], quantile: float) -> float:
@@ -169,10 +168,18 @@ class Orchestrator:
         resolved_island_id = island_id if island_id is not None else (context_id if context_id is not None else 0)
         self.island_id = resolved_island_id
         # Stop governor: always enabled for convergence detection
+        if config.cost_patience_tokens is not None:
+            config.stop_governor_config.max_cost_no_improvement_tokens = config.cost_patience_tokens
+        if config.cost_patience_dollars is not None:
+            config.stop_governor_config.max_monetary_cost_no_improvement = config.cost_patience_dollars
         self.stop_governor = StopGovernor(config.stop_governor_config)
         self.total_tokens_spent: int = 0
+        self.total_monetary_cost_spent_usd: float = 0.0
         self._governor_prev_evals: int = 0
         self._governor_token_buffer: int = 0
+        self._governor_monetary_cost_buffer: float = 0.0
+        self._governor_prev_total_tokens_spent: int = 0
+        self._governor_prev_total_monetary_cost_usd: float = 0.0
         self._shard_cache: dict[tuple[int, float], list[str]] = {}
         self.metrics_callback = metrics_callback
         self.logger: LoggerProtocol = logger or StdOutLogger()
@@ -212,7 +219,7 @@ class Orchestrator:
         self._ema_alpha: float = 0.1  # EMA smoothing factor
         self._priority_beta: float = 0.05  # Quality tie-breaker weight
         self._recent_delta_weight: float = 0.5  # Boost for parents with recent improvements
-        self._queue_buffer_mult: float = 3.0  # Target queue depth = 3 × concurrency
+        self._queue_buffer_mult: float = 3.0  # Target queue depth = 3 x concurrency
         # Maintain 3x concurrency buffer to prevent evaluator starvation
         # when mutations temporarily lag behind fast evaluations
         self._mutation_kp: float = 0.2  # Proportional gain for mutation pacing
@@ -277,6 +284,11 @@ class Orchestrator:
         # Pass metrics to evaluator for cache tracking
         self.evaluator.metrics = self.metrics
 
+        # Telemetry
+        from turbo_gepa.telemetry import TelemetryCollector
+        self._telemetry = TelemetryCollector.initialize(self._run_id, self.island_id)
+        self._telemetry_task: asyncio.Task | None = None
+
         # Capture the candidate that hits the target at the final rung so we can
         # later surface its exact prompt even if it falls off the Pareto frontier.
         self._north_star_fp: str | None = None
@@ -286,6 +298,31 @@ class Orchestrator:
 
         # Scheduler state derived from capacities
         self._recompute_capacities()
+
+    async def _telemetry_pulse(self) -> None:
+        """Background task to flush operational telemetry."""
+        while True:
+            try:
+                queue_ready = len(self.queue) + len(self._priority_queue)
+                queue_mutation = len(self._mutation_buffer)
+                queue_replay = self._replay_queue.qsize()
+                # Approximate straggler count based on known pending vs running
+                # Ideally get precise count from evaluator if possible,
+                # or use _pending_fingerprints - _inflight_fingerprints logic
+                stragglers = 0 # Simple placeholder, refine if needed
+
+                snap = self._telemetry.snapshot(
+                    inflight=self._total_inflight,
+                    limit=self._effective_concurrency,
+                    queue_ready=queue_ready,
+                    queue_mutation=queue_mutation,
+                    queue_replay=queue_replay,
+                    stragglers=stragglers
+                )
+                self._telemetry.publish(snap)
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
 
     def _set_stop_reason(self, reason: str) -> None:
         """Record why the orchestration loop decided to stop."""
@@ -346,7 +383,7 @@ class Orchestrator:
             # Try to capture the best full-shard entry (candidate + prompt) at the moment of target attainment.
             try:
                 tol = 1e-6
-                # Prefer to scan latest_results so we include dominated (non-Pareto) full‑shard entries
+                # Prefer to scan latest_results so we include dominated (non-Pareto) full-shard entries
                 full_fp: str | None = None
                 full_quality: float = -1.0
                 for fp, res in self.latest_results.items():
@@ -489,10 +526,6 @@ class Orchestrator:
     @property
     def run_started_at(self) -> float | None:
         return self._run_started_at
-
-    @property
-    def run_id(self) -> str:
-        return self._run_id
 
     @property
     def run_id(self) -> str:
@@ -719,8 +752,8 @@ class Orchestrator:
     def _compute_priority(self, candidate: Candidate, rung_idx: int) -> float:
         """Compute priority = P_finish(rung_idx) / cost_remaining[rung_idx].
 
-        P_finish = (product of promotion_ema from rung_idx to final) × final_success_ema
-        Optional quality tie-breaker: multiply by (1 + beta × normalized_quality)
+        P_finish = (product of promotion_ema from rung_idx to final) x final_success_ema
+        Optional quality tie-breaker: multiply by (1 + beta x normalized_quality)
         """
         rung_idx = max(0, min(rung_idx, len(self._runtime_shards) - 1))
         # Calculate probability of reaching and succeeding at final rung
@@ -788,11 +821,17 @@ class Orchestrator:
                 self._latency_ema = (1 - alpha) * self._latency_ema + alpha * duration
             self._latency_samples += 1
             self._latency_history.append(duration)
+
         timed_out = False
         for trace in result.traces:
             if isinstance(trace, dict) and trace.get("error") == "timeout":
                 timed_out = True
                 break
+
+        # Telemetry record
+        if self._telemetry:
+            self._telemetry.record_eval_completion(duration, error=timed_out)
+
         self._eval_samples += 1
         if timed_out:
             self._timeout_count += 1
@@ -893,7 +932,7 @@ class Orchestrator:
                 if new_shards[i] >= max_allowed:
                     new_shards[i] = max(0.05, max_allowed)
             new_shards[-1] = 1.0
-            if any(abs(a - b) > 1e-4 for a, b in zip(new_shards, self._runtime_shards)):
+            if any(abs(a - b) > 1e-4 for a, b in zip(new_shards, self._runtime_shards, strict=True)):
                 if self.show_progress:
                     before = ", ".join(f"{s:.2f}" for s in self._runtime_shards)
                     after = ", ".join(f"{s:.2f}" for s in new_shards)
@@ -1184,6 +1223,9 @@ class Orchestrator:
         if _debug_log_path:
             _debug_log(f"   Debug log: {_debug_log_path}")
 
+        # Start telemetry pulse
+        self._telemetry_task = asyncio.create_task(self._telemetry_pulse())
+
         # Track first round start
         self.metrics.start_round()
         if not self.metrics.baseline_recorded:
@@ -1226,6 +1268,17 @@ class Orchestrator:
                 if elapsed >= self.config.max_optimization_time_seconds:
                     _debug_log(f"⏱️  TIMEOUT: Reached max optimization time ({elapsed:.1f}s >= {self.config.max_optimization_time_seconds:.1f}s)")
                     self._set_stop_reason("timeout")
+                    # Cancel all in-flight tasks to exit quickly
+                    if self._inflight_tasks:
+                        _debug_log(f"   Cancelling {len(self._inflight_tasks)} in-flight evaluations...")
+                        for task in self._inflight_tasks.values():
+                            task.cancel()
+                    break
+            # Check total cost limit
+            if self.config.max_total_cost_dollars is not None:
+                if self.total_monetary_cost_spent_usd >= self.config.max_total_cost_dollars:
+                    _debug_log(f"💰 BUDGET CAP: Reached max cost (${self.total_monetary_cost_spent_usd:.4f} >= ${self.config.max_total_cost_dollars:.2f})")
+                    self._set_stop_reason("cost_limit_exceeded")
                     # Cancel all in-flight tasks to exit quickly
                     if self._inflight_tasks:
                         _debug_log(f"   Cancelling {len(self._inflight_tasks)} in-flight evaluations...")
@@ -1346,7 +1399,7 @@ class Orchestrator:
 
             # Debug mutation spawning logic
             if loop_iter % 100 == 0 and len(self.queue) == 0 and self._total_inflight == 0:
-                task_status = 'None' if self._mutation_task is None else ('done' if self._mutation_task.done() else 'running')
+                task_status = "None" if self._mutation_task is None else ("done" if self._mutation_task.done() else "running")
                 _debug_log(
                     f"🔍 MUTATION CHECK: queue={len(self.queue)}, priority={len(self._priority_queue)}, "
                     f"target_soft={soft_target}, need_depth={need_depth}, need_queue={need_queue}, "
@@ -1509,6 +1562,9 @@ class Orchestrator:
             self._mutation_task.cancel()
             # Don't wait for it - just let it cancel in the background
 
+        if self._telemetry_task and not self._telemetry_task.done():
+            self._telemetry_task.cancel()
+
         # Final save
         await self._save_state()
 
@@ -1648,7 +1704,6 @@ class Orchestrator:
         This ensures the live dashboard shows the OG seed node before the first
         evaluation completes (useful for slow models).</n+        """
         try:
-            import time as _time
             dir_path = evo_dir or os.path.abspath(os.path.join(self.config.log_path, "..", "evolution"))
             os.makedirs(dir_path, exist_ok=True)
             # Build a minimal lineage with seeds
@@ -1715,7 +1770,9 @@ class Orchestrator:
         Output: .turbo_gepa/evolution/<run_id>.summary.json and current_summary.json
         """
         import os
+        import time
 
+        now = time.time()
         evo_dir = os.path.abspath(os.path.join(self.config.log_path, "..", "evolution"))
         os.makedirs(evo_dir, exist_ok=True)
 
@@ -1729,13 +1786,13 @@ class Orchestrator:
         nodes: set[str] = set(parent_children.keys())
         for kids in parent_children.values():
             nodes.update(kids)
-        indeg: dict[str, int] = {n: 0 for n in nodes}
+        indeg: dict[str, int] = dict.fromkeys(nodes, 0)
         for p, kids in parent_children.items():
             for c in kids:
                 indeg[c] = indeg.get(c, 0) + 1
             indeg.setdefault(p, indeg.get(p, 0))
         roots = [n for n in nodes if indeg.get(n, 0) == 0]
-        depth: dict[str, int] = {n: 0 for n in roots}
+        depth: dict[str, int] = dict.fromkeys(roots, 0)
         from collections import deque
         q = deque(roots)
         while q:
@@ -1757,7 +1814,7 @@ class Orchestrator:
         summary = {
             "run_id": self._run_id,
             "evaluations": int(self.evaluations_run),
-            "unique_parents": int(len(parent_children)),
+            "unique_parents": len(parent_children),
             "unique_children": int(evo_stats.get("unique_children", 0)),
             "evolution_edges": int(evo_stats.get("evolution_edges", 0)),
             "mutations_generated": int(evo_stats.get("mutations_generated", 0)),
@@ -1832,8 +1889,6 @@ class Orchestrator:
                 self._track_waiting(rung_idx, 1)
                 break
 
-            priority = -neg_priority
-
             # Check if candidate is already inflight or completed
             fingerprint = candidate.fingerprint
             if fingerprint in self._inflight_fingerprints:
@@ -1886,7 +1941,7 @@ class Orchestrator:
         self._candidate_eval_examples[candidate.fingerprint] = list(shard_ids)
 
         # Determine per-candidate concurrency and respect a global budget to optimize throughput
-        # Share final‑rung capacity across concurrently running full‑shard candidates to overlap tails.
+        # Share final-rung capacity across concurrently running full-shard candidates to overlap tails.
         desired = min(self._effective_concurrency, len(shard_ids))
         if shard_idx == self._final_rung_index:
             # Target a fair share based on configured inflight cap (dynamic, simple)
@@ -1898,7 +1953,7 @@ class Orchestrator:
         if self.config.global_concurrency_budget:
             available = max(0, self._effective_concurrency - self._examples_inflight)
             if available <= 0:
-                # Not enough global budget right now – defer launch
+                # Not enough global budget right now - defer launch
                 # Put candidate back on priority queue and try later
                 self._pending_fingerprints.add(candidate.fingerprint)
                 self.queue.append(candidate)
@@ -1930,7 +1985,6 @@ class Orchestrator:
         # IMPORTANT: Use the shard_idx passed to this function, NOT _get_rung_key()!
         # The candidate may be promoted during evaluation, changing its shard index.
         # We must use the EXACT shard fraction this launch is evaluating on.
-        rung_key_at_launch = str(shard_fraction)  # Use the actual shard fraction for this evaluation
         fingerprint_at_launch = candidate.fingerprint
         # Reserve budget for this candidate
         self._examples_inflight += per_cand_concurrency
@@ -2125,6 +2179,9 @@ class Orchestrator:
         tokens_obj = result.objectives.get("tokens") if isinstance(result.objectives, dict) else None
         if isinstance(tokens_obj, (int, float)):
             self._governor_token_buffer += int(tokens_obj)
+        money_obj = result.objectives.get("monetary_cost") if isinstance(result.objectives, dict) else None
+        if isinstance(money_obj, (int, float)):
+            self._governor_monetary_cost_buffer += float(money_obj)
 
         prev_idx = self._clamp_rung_index(self.scheduler.current_shard_index(candidate_with_meta))
         decision = self.scheduler.record(candidate_with_meta, result, self.config.promote_objective)
@@ -2351,9 +2408,9 @@ class Orchestrator:
                     is_final_shard=is_final_shard,
                 )
                 result = result.merge(replay)
-        score = self._score_result(candidate, result, shard_idx, shard_fraction, is_final_shard)
+        self._score_result(candidate, result, shard_idx, shard_fraction, is_final_shard)
         self._update_eval_metrics(candidate, result)
-        candidate_with_meta, decision = await self._ingest_result(candidate, result)
+        _, decision = await self._ingest_result(candidate, result)
 
         shard_fraction = self._runtime_shards[min(shard_idx, len(self._runtime_shards) - 1)]
         quality = result.objectives.get(self.config.promote_objective, 0.0)
@@ -2593,7 +2650,7 @@ class Orchestrator:
                     progress_ratio = max_rung_idx / total_progress_rungs
                     rung_factor = 1.0 + 0.5 * progress_ratio  # Up to +50% when final rung active
 
-            adjusted_mutations = max(self._mutation_min, int(round(num_mutations * rung_factor)))
+            adjusted_mutations = max(self._mutation_min, round(num_mutations * rung_factor))
             if self.config.max_mutations_per_round:
                 adjusted_mutations = min(self.config.max_mutations_per_round, adjusted_mutations)
 
@@ -2837,7 +2894,7 @@ class Orchestrator:
             except Exception:
                 parent_sched_key = entry.candidate.fingerprint
 
-            # Collect per‑rung parent scores from scheduler history, keyed by rung fraction
+            # Collect per-rung parent scores from scheduler history, keyed by rung fraction
             parent_rung_scores: dict[float, float] = {}
             try:
                 shards = getattr(self.scheduler, "shards", list(self.config.shards))
@@ -2854,7 +2911,6 @@ class Orchestrator:
                 parent_rung_scores=parent_rung_scores,
                 _sched_key=parent_sched_key,
             )
-            parent_meta = candidate_with_parent.meta if isinstance(candidate_with_parent.meta, dict) else {}
             parent_key = parent_sched_key
 
             # Note: We used to skip parents in _promotion_pending, but this caused issues
@@ -3013,71 +3069,6 @@ class Orchestrator:
         return snapshot
 
     def get_candidate_lineage_data(self) -> list[dict[str, Any]]:
-        """Return list of all candidates with generation, quality, shard and status for visualization."""
-
-        data: list[dict[str, Any]] = []
-        seen_keys: set[str] = set()
-        promote_objective = self.config.promote_objective
-
-        # Get all pareto candidates
-        for entry in self.archive.pareto_entries():
-            meta = entry.candidate.meta if isinstance(entry.candidate.meta, dict) else {}
-            key = meta.get("_sched_key") if isinstance(meta, dict) else None
-            if not isinstance(key, str):
-                key = entry.candidate.fingerprint
-            fp = self._sched_to_fingerprint.get(key, entry.candidate.fingerprint)
-            seen_keys.add(key)
-            shard = entry.result.shard_fraction or 0.0
-            full = entry.candidate.text
-            snippet = " ".join(full.split())
-            if len(snippet) > 180:
-                snippet = snippet[:179] + "…"
-            data.append(
-                {
-                    "fingerprint": fp,
-                    "generation": self._candidate_generations.get(key, 0),
-                    "quality": entry.result.objectives.get(promote_objective, 0.0),
-                    "status": "promoted",
-                    "shard_fraction": shard,
-                    "prompt": snippet,
-                    "prompt_full": full,
-                }
-            )
-
-        # Get in-flight candidates (queue)
-        for candidate in self.queue:
-            meta = candidate.meta if isinstance(candidate.meta, dict) else {}
-            key = meta.get("_sched_key") if isinstance(meta, dict) else None
-            if not isinstance(key, str):
-                key = candidate.fingerprint
-            fp = self._sched_to_fingerprint.get(key, candidate.fingerprint)
-            # Lookup latest quality and shard if present
-            quality = 0.0
-            shard = 0.0
-            cache_key = candidate_key(candidate)
-            latest = self.latest_results.get(cache_key)
-            if latest:
-                quality = latest.objectives.get(promote_objective, 0.0)
-                shard = latest.shard_fraction or 0.0
-            full = candidate.text
-            snippet = " ".join(full.split())
-            if len(snippet) > 180:
-                snippet = snippet[:179] + "…"
-            data.append(
-                {
-                    "fingerprint": fp,
-                    "generation": self._candidate_generations.get(key, 0),
-                    "quality": quality,
-                    "status": "in_flight",
-                    "shard_fraction": shard,
-                    "prompt": snippet,
-                    "prompt_full": full,
-                }
-            )
-
-        return data
-
-    def get_candidate_lineage_data(self) -> list[dict[str, Any]]:
         """Return list of all candidates with generation, quality, shard, prompt and status for visualization.
 
         Includes:
@@ -3182,7 +3173,7 @@ class Orchestrator:
         # Build reverse map from candidate_key to Candidate
         key_to_cand: dict[str, Any] = {}
         try:
-            for fp, cand in self._candidates_by_fp.items():
+            for _fp, cand in self._candidates_by_fp.items():
                 ck = candidate_key(cand)
                 key_to_cand[ck] = cand
         except Exception:
@@ -3454,8 +3445,8 @@ class Orchestrator:
         if not pareto_entries:
             return False, {"reason": "no_pareto_candidates"}
 
-        # Enforce final‑rung discipline for auto‑stop: do not allow the governor
-        # to stop early unless we've observed at least one full‑shard evaluation.
+        # Enforce final-rung discipline for auto-stop: do not allow the governor
+        # to stop early unless we've observed at least one full-shard evaluation.
         # This keeps auto convergence aligned with "final rung or target" semantics.
         try:
             full_shard = self._runtime_shards[-1] if self._runtime_shards else 1.0
@@ -3496,7 +3487,16 @@ class Orchestrator:
         tokens_delta = int(self._governor_token_buffer)
         self._governor_token_buffer = 0
         self.total_tokens_spent += tokens_delta
+
+        money_delta = float(self._governor_monetary_cost_buffer)
+        self._governor_monetary_cost_buffer = 0.0
+        self.total_monetary_cost_spent_usd += money_delta
+
         self._governor_prev_evals = self.evaluations_run
+
+        tokens_spent_this_epoch = self.total_tokens_spent - self._governor_prev_total_tokens_spent
+        money_spent_this_epoch = self.total_monetary_cost_spent_usd - self._governor_prev_total_monetary_cost_usd
+        self.metrics.total_cost_usd = self.total_monetary_cost_spent_usd
 
         # Create epoch metrics
         metrics = EpochMetrics(
@@ -3507,8 +3507,12 @@ class Orchestrator:
             best_cost=best_entry.result.objectives.get("neg_cost", float("-inf")),
             frontier_ids={e.candidate.fingerprint for e in pareto_entries},
             total_tokens_spent=self.total_tokens_spent,
+            tokens_spent_this_epoch=tokens_spent_this_epoch,
+            monetary_cost_spent_this_epoch=money_spent_this_epoch,
         )
 
+        self._governor_prev_total_tokens_spent = self.total_tokens_spent
+        self._governor_prev_total_monetary_cost_usd = self.total_monetary_cost_spent_usd
         self.stop_governor.update(metrics)
         return self.stop_governor.should_stop()
 

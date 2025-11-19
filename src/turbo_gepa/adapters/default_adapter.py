@@ -14,19 +14,18 @@ settings via ModelConfig; DefaultAdapter uses LiteLLM directly by default.
 from __future__ import annotations
 
 import asyncio
+import math
+import os
+import random
+import re
+import shutil
+import tempfile
+import uuid
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-import shutil
-import tempfile
 from typing import Any, Awaitable, Sequence
-import os
-import uuid
-
-import random
-import re
-import math
 
 from turbo_gepa.archive import Archive, ArchiveEntry
 from turbo_gepa.cache import DiskCache
@@ -36,7 +35,6 @@ from turbo_gepa.config import (
     adaptive_config,
     recommended_executor_workers,
 )
-from turbo_gepa.scoring import ScoringFn, SCORE_KEY
 from turbo_gepa.evaluator import AsyncEvaluator
 from turbo_gepa.interfaces import Candidate, EvalResult
 from turbo_gepa.islands import IslandContext, spawn_islands
@@ -46,6 +44,7 @@ from turbo_gepa.migrations import MigrationBackend
 from turbo_gepa.mutator import MutationConfig, Mutator
 from turbo_gepa.orchestrator import Orchestrator
 from turbo_gepa.sampler import InstanceSampler
+from turbo_gepa.scoring import SCORE_KEY, ScoringFn
 from turbo_gepa.strategies import ReflectionStrategy
 from turbo_gepa.utils.litellm_client import configure_litellm_client
 
@@ -439,7 +438,7 @@ class DefaultAdapter:
             mapped: dict[str, float] = {objective: value}
             if objective != "quality" and "quality" in metrics:
                 mapped["quality"] = metrics.get("quality", 0.0)
-            for extra in ("tokens", "neg_cost"):
+            for extra in ("tokens", "neg_cost", "monetary_cost"):
                 if extra in metrics:
                     mapped[extra] = metrics[extra]
             return mapped
@@ -503,9 +502,9 @@ class DefaultAdapter:
 
                 start_time = time.time()
                 try:
-                    from litellm import acompletion
-
                     import asyncio
+
+                    from litellm import acompletion
 
                     async def invoke_reflection():
                         return await self._acompletion_with_client(
@@ -1031,7 +1030,7 @@ class DefaultAdapter:
         example = self.example_map[example_id].to_payload()
 
         try:
-            from litellm import acompletion
+            from litellm import acompletion, completion_cost
 
             system_prompt = (candidate.text or "").rstrip()
             completion_kwargs: dict[str, Any] = {
@@ -1060,8 +1059,8 @@ class DefaultAdapter:
             if reasoning_effort is not None and not self.task_model.name.endswith("gpt-oss-120b:nitro"):
                 completion_kwargs["reasoning_effort"] = reasoning_effort
 
-            import time as _time_module
             import asyncio
+            import time as _time_module
 
             _start_llm = _time_module.time()
 
@@ -1125,6 +1124,10 @@ class DefaultAdapter:
 
             model_output = response.choices[0].message.content
             tokens_used = response.usage.total_tokens
+            try:
+                cost_usd = completion_cost(completion_response=response)
+            except Exception:
+                cost_usd = 0.0
 
             answer_field = example.get("answer")
             expected_token = _extract_numeric_answer(answer_field)
@@ -1146,6 +1149,7 @@ class DefaultAdapter:
                 "quality": quality,
                 "neg_cost": -float(tokens_used),
                 "tokens": float(tokens_used),
+                "monetary_cost": float(cost_usd),
                 "response": model_output,
                 "example_id": example_id,
                 "output": model_output,
@@ -1252,13 +1256,18 @@ class DefaultAdapter:
         *,
         max_rounds: int | None = None,
         max_evaluations: int | None = None,
-        task_lm: str | None = None,  # Kept for API compatibility; models come from adapter init
-        reflection_lm: str | None = None,  # Kept for API compatibility; models come from adapter init
-        optimize_temperature_after_convergence: bool = False,  # Stage temperature optimization
-        display_progress: bool = True,  # Show progress charts
+        max_cost: float | None = None,  # New cost limit
+        task_lm: str | None = None,
+        reflection_lm: str | None = None,
+        optimize_temperature_after_convergence: bool = False,
+        display_progress: bool = True,
         enable_auto_stop: bool = True,
-        metrics_callback: Callable | None = None,  # Callback for dashboard updates
+        metrics_callback: Callable | None = None,
     ) -> dict[str, Any]:
+        # Apply runtime overrides to config
+        if max_cost is not None:
+            self.config.max_total_cost_dollars = float(max_cost)
+
         run_token = self._forced_run_token or os.getenv("TURBOGEPA_RUN_ID") or uuid.uuid4().hex[:8]
         self._current_run_token = run_token
         if self.config.n_islands > 1 and not self.control_dir:
@@ -1683,14 +1692,15 @@ class DefaultAdapter:
         *,
         max_rounds: int | None = None,
         max_evaluations: int | None = None,
-        task_lm: str | None = None,  # Kept for API compatibility; models come from adapter init
-        reflection_lm: str | None = None,  # Kept for API compatibility; models come from adapter init
-        optimize_temperature_after_convergence: bool = False,  # Stage temperature optimization
-        display_progress: bool = True,  # Show progress charts
+        max_cost: float | None = None,
+        task_lm: str | None = None,
+        reflection_lm: str | None = None,
+        optimize_temperature_after_convergence: bool = False,
+        display_progress: bool = True,
         enable_auto_stop: bool = True,
-        enable_seed_initialization: bool = False,  # Use PROMPT-MII-style seed generation
-        num_generated_seeds: int = 3,  # How many seeds to generate if initializing
-        metrics_callback: Callable | None = None,  # Callback for dashboard updates
+        enable_seed_initialization: bool = False,
+        num_generated_seeds: int = 3,
+        metrics_callback: Callable | None = None,
     ) -> dict[str, Any]:
         """
         Optimize prompts using TurboGEPA with real LLM evaluation via LiteLLM.
@@ -1699,6 +1709,7 @@ class DefaultAdapter:
             seeds: Initial prompt candidates
             max_rounds: Maximum optimization rounds (None = unlimited)
             max_evaluations: Maximum evaluations (None = unlimited)
+            max_cost: Maximum cost in USD (None = unlimited)
             task_lm: Kept for compatibility; adapter uses model set at construction
             reflection_lm: Kept for compatibility; adapter uses model set at construction
             optimize_temperature_after_convergence: Stage temperature optimization after
@@ -1749,6 +1760,7 @@ class DefaultAdapter:
                 seeds,
                 max_rounds=max_rounds,
                 max_evaluations=max_evaluations,
+                max_cost=max_cost,
                 task_lm=task_lm,
                 reflection_lm=reflection_lm,
                 optimize_temperature_after_convergence=optimize_temperature_after_convergence,

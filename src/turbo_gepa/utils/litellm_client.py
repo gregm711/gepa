@@ -18,8 +18,8 @@ def configure_litellm_client(max_concurrency: int) -> None:
         max_concurrency = 1
 
     try:
-        import litellm  # type: ignore
         import httpx  # type: ignore
+        import litellm  # type: ignore
     except ImportError:
         return
 
@@ -38,9 +38,9 @@ def configure_litellm_client(max_concurrency: int) -> None:
         try:
             if hasattr(litellm, "aclient_session"):
                 _close_async_client(litellm.aclient_session)
-            setattr(litellm, "aclient_session", None)
-            setattr(litellm, "client_session", None)
-            setattr(litellm, "litellm_client", None)
+            litellm.aclient_session = None
+            litellm.client_session = None
+            litellm.litellm_client = None
         except Exception:
             pass
         return
@@ -58,7 +58,7 @@ def _disable_litellm_logging(litellm: Any) -> None:
         litellm.failure_callback = []
         litellm.suppress_debug_info = True
         litellm.set_verbose = False
-        setattr(litellm, "logging", False)
+        litellm.logging = False
 
         utils = getattr(litellm, "utils", None)
         helper = getattr(utils, "_client_async_logging_helper", None)

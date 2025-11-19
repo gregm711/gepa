@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from .logger import LogLevel, LoggerProtocol
+from .logger import LoggerProtocol, LogLevel
 
 if TYPE_CHECKING:  # pragma: no cover
     from turbo_gepa.orchestrator import Orchestrator
@@ -33,14 +33,15 @@ class ProgressSnapshot:
     pareto_size: int
     best_quality: float
     best_quality_shard: float
-    best_prompt_snippet: Optional[str]
+    best_prompt_snippet: str | None
     queue_size: int
     inflight_candidates: int
     inflight_examples: int
-    target_quality: Optional[float] = None
+    target_quality: float | None = None
     target_shard_fraction: float = 1.0
     target_reached: bool = False
-    stop_reason: Optional[str] = None
+    total_cost_usd: float = 0.0
+    stop_reason: str | None = None
     promotion_attempts: dict[int, int] = field(default_factory=dict)
     promotion_promoted: dict[int, int] = field(default_factory=dict)
     promotion_pruned: dict[int, int] = field(default_factory=dict)
@@ -52,7 +53,7 @@ def build_progress_snapshot(orchestrator: Orchestrator) -> ProgressSnapshot:
     pareto_entries = orchestrator.archive.pareto_entries()
     best_quality = 0.0
     best_shard = 0.0
-    snippet: Optional[str] = None
+    snippet: str | None = None
     if pareto_entries:
         promote_obj = orchestrator.config.promote_objective
         full_shard = orchestrator._runtime_shards[-1] if orchestrator._runtime_shards else 1.0
@@ -89,6 +90,7 @@ def build_progress_snapshot(orchestrator: Orchestrator) -> ProgressSnapshot:
     attempts = dict(getattr(metrics, "promotion_attempts_by_rung", {})) if metrics else {}
     promoted = dict(getattr(metrics, "promotions_by_rung", {})) if metrics else {}
     pruned = dict(getattr(metrics, "promotion_pruned_by_rung", {})) if metrics else {}
+    cost_usd = getattr(metrics, "total_cost_usd", 0.0) if metrics else 0.0
 
     return ProgressSnapshot(
         timestamp=time.time(),
@@ -106,6 +108,7 @@ def build_progress_snapshot(orchestrator: Orchestrator) -> ProgressSnapshot:
         target_quality=target,
         target_shard_fraction=target_shard,
         target_reached=target_reached,
+        total_cost_usd=cost_usd,
         stop_reason=orchestrator.stop_reason,
         promotion_attempts=attempts,
         promotion_promoted=promoted,
@@ -121,7 +124,7 @@ class ProgressReporter:
         self.log_prompts = log_prompts
         self._last_round = -1
         self._prev_best = 0.0
-        self._last_improvement_ts: Optional[float] = None
+        self._last_improvement_ts: float | None = None
 
     def __call__(self, snapshot: ProgressSnapshot) -> None:
         """Record a snapshot (matches the metrics_callback signature)."""
@@ -161,10 +164,11 @@ class ProgressReporter:
             for rung in sorted(snapshot.promotion_attempts):
                 attempts = snapshot.promotion_attempts.get(rung, 0)
                 promoted = snapshot.promotion_promoted.get(rung, 0)
-                pruned = snapshot.promotion_pruned.get(rung, 0)
                 rate = promoted / attempts if attempts else 0.0
                 parts.append(f"{rung}:{promoted}/{attempts} ({rate:.0%})")
             rung_stats = " promotions=[" + ", ".join(parts[:4]) + "]"
+
+        cost_str = f" cost=${snapshot.total_cost_usd:.4f}"
 
         self.logger.log(
             (
@@ -175,7 +179,7 @@ class ProgressReporter:
                 f"(Δ={delta_str}, last_improve={since_str}) "
                 f"pareto={snapshot.pareto_size} "
                 f"queue={snapshot.queue_size} inflight={snapshot.inflight_candidates}"
-                f"{target_block}{rung_stats}"
+                f"{target_block}{cost_str}{rung_stats}"
             ),
             LogLevel.WARNING,
         )
@@ -202,6 +206,7 @@ class ProgressReporter:
             "target_quality": snapshot.target_quality,
             "target_shard": snapshot.target_shard_fraction,
             "target_reached": snapshot.target_reached,
+            "total_cost_usd": snapshot.total_cost_usd,
             "stop_reason": snapshot.stop_reason,
             "promotion_attempts": snapshot.promotion_attempts,
             "promotion_promoted": snapshot.promotion_promoted,

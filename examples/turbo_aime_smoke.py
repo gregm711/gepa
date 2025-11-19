@@ -169,7 +169,7 @@ def main() -> None:
             "Defaults to all built-in strategies when omitted."
         ),
     )
-    parser.add_argument("--open-ui", action="store_true", help="Open live evolution UI (http://localhost:8080/scripts/evolution_live.html)")
+    parser.add_argument("--open-ui", action="store_true", help="Show instructions for the live evolution dashboard")
     args = parser.parse_args()
 
     _configure_hf_cache(args.hf_cache)
@@ -179,11 +179,7 @@ def main() -> None:
 
     # Optionally bring up live UI
     if args.open_ui:
-        try:
-            subprocess.Popen(["python", "-m", "http.server", "8080"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            webbrowser.open("http://localhost:8080/scripts/evolution_live_v2.html")
-        except Exception:
-            pass
+        print("\n🚀 For live visualization, run:\n   python scripts/viz_server.py\n")
 
     adapter = DefaultAdapter(
         dataset=dataset,

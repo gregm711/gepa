@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
-import inspect
 import json
 import os
 from typing import Any, Callable, Sequence
@@ -115,7 +114,7 @@ def run_worker_from_factory(
 def _load_seeds_from_path(path: str | None) -> list[str] | None:
     if not path:
         return None
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
     if not isinstance(data, list):
         raise ValueError("Seed file must contain a JSON list")

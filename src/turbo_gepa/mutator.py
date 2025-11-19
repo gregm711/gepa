@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Sequence
 
-from turbo_gepa.logging.logger import LogLevel, LoggerProtocol, StdOutLogger
+from turbo_gepa.logging.logger import LoggerProtocol, LogLevel, StdOutLogger
 
 from .interfaces import Candidate
 
@@ -148,14 +148,14 @@ class Mutator:
     ) -> dict[str, int]:
         """Allocate mutation slots across operators using bandit-style weights."""
         if total_budget <= 0 or not available_ops:
-            return {name: 0 for name in available_ops}
+            return dict.fromkeys(available_ops, 0)
 
         weights: dict[str, float] = {}
         for name in available_ops:
             weights[name] = max(self._operator_weight(name), 0.01)
 
         weight_sum = sum(weights.values())
-        budgets = {name: 0 for name in available_ops}
+        budgets = dict.fromkeys(available_ops, 0)
 
         if weight_sum <= 0:
             # Evenly distribute when we have no signal yet
@@ -173,7 +173,7 @@ class Mutator:
             if remaining <= 0:
                 break
             ideal = total_budget * (weights[name] / weight_sum)
-            quota = int(round(ideal))
+            quota = round(ideal)
             # Ensure every operator gets at least one slot while budget remains
             min_quota = 1 if remaining >= ops_left else 0
             quota = max(min_quota, quota)
@@ -289,6 +289,13 @@ class Mutator:
             batch = await completed
             proposals.extend(batch)
 
+        # Telemetry: Record generated count
+        from turbo_gepa.telemetry import TelemetryCollector
+        telemetry = TelemetryCollector.get_instance()
+        if telemetry:
+            for _ in range(len(proposals)):
+                telemetry.record_mutation_generated()
+
         llm_time = time.time() - llm_start
         propose_total = time.time() - propose_start
 
@@ -297,11 +304,11 @@ class Mutator:
 
         # Log timing breakdown
         self.logger.log("⏱️  Mutator timing (STREAMING):")
-        self.logger.log(f"   Temperature: 0.00s (0 sent instantly)")
+        self.logger.log("   Temperature: 0.00s (0 sent instantly)")
         self.logger.log(f"   LLM calls (parallel): {llm_time:.2f}s")
         self.logger.log(f"     - Total streamed: {len(proposals)} candidates")
         self.logger.log(f"   Total propose: {propose_total:.2f}s")
-        self.logger.log(f"   ✅ Candidates streamed to orchestrator during generation")
+        self.logger.log("   ✅ Candidates streamed to orchestrator during generation")
 
         return proposals  # Return all for metrics, but candidates already streamed
 
@@ -515,7 +522,7 @@ class Mutator:
 
         # Stream results as they complete (don't wait for all)
         results: list[str] = []
-        for idx, completed in enumerate(asyncio.as_completed(tasks)):
+        for _idx, completed in enumerate(asyncio.as_completed(tasks)):
             try:
                 batch = await completed
                 if batch:

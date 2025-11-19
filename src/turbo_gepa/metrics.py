@@ -92,6 +92,9 @@ class Metrics:
     time_scheduler_total: float = 0.0
     time_archive_total: float = 0.0
 
+    # Cost Tracking
+    total_cost_usd: float = 0.0
+
     # Round-level tracking
     round_start_times: list[float] = field(default_factory=list)
     round_durations: list[float] = field(default_factory=list)
@@ -130,22 +133,6 @@ class Metrics:
             self.best_rung_quality = quality
             if elapsed is not None:
                 self.time_to_best_rung = max(elapsed, 0.0)
-    baseline_quality: float = 0.0
-    target_quality: float | None = None
-    time_to_target_seconds: float | None = None
-
-    def turbo_score(self) -> float | None:
-        if (
-            self.target_quality is None
-            or self.time_to_target_seconds is None
-            or self.time_to_target_seconds <= 0
-            or not self.baseline_recorded
-        ):
-            return None
-        gain = self.target_quality - self.baseline_quality
-        if gain <= 0:
-            return 0.0
-        return gain / self.time_to_target_seconds
 
     def record_llm_call(self, call_type: str, latency: float) -> None:
         """Record an LLM API call with timing."""
@@ -413,6 +400,7 @@ class Metrics:
             "final_rung_inflight_mean": self.final_rung_inflight_mean,
             "early_stops_target_quality": self.early_stops_target_quality,
             "final_rung_early_stops_target_quality": self.final_rung_early_stops_target_quality,
+            "total_cost_usd": self.total_cost_usd,
         }
 
     def format_summary(self) -> str:
@@ -492,7 +480,7 @@ class Metrics:
             "",
             "🧠 Reflection Strategies:",
             f"  Calls: {dict(self.strategy_call_counts)}",
-            f"  Mean latency by strategy: {{" + ", ".join(f"{k}: {self.strategy_latency_mean(k):.2f}s" for k in self.strategy_call_counts) + "}}",
+            "  Mean latency by strategy: {" + ", ".join(f"{k}: {self.strategy_latency_mean(k):.2f}s" for k in self.strategy_call_counts) + "}}",
             "",
             "⏱️  Timing Breakdown:",
             f"  Evaluation: {self.time_eval_total:.1f}s",

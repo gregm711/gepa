@@ -53,14 +53,13 @@ from dspy.primitives import Example, Prediction
 from turbo_gepa.archive import Archive
 from turbo_gepa.cache import DiskCache
 from turbo_gepa.config import DEFAULT_CONFIG, Config
-from turbo_gepa.scoring import ScoringFn, SCORE_KEY
 from turbo_gepa.evaluator import AsyncEvaluator
 from turbo_gepa.interfaces import Candidate
 from turbo_gepa.mutator import MutationConfig, Mutator
 from turbo_gepa.orchestrator import Orchestrator
 from turbo_gepa.sampler import InstanceSampler
+from turbo_gepa.scoring import SCORE_KEY, ScoringFn
 from turbo_gepa.utils.litellm_client import configure_litellm_client
-
 
 DSPyTrace = list[tuple[Any, dict[str, Any], Prediction]]
 
@@ -512,7 +511,7 @@ class DSpyAdapter:
 
         return dataset
 
-    def _build_orchestrator(self, max_rounds: int = 100) -> Orchestrator:
+    def _build_orchestrator(self, max_rounds: int = 100, metrics_callback: Callable | None = None) -> Orchestrator:
         """Build TurboGEPA orchestrator."""
         objective = self.config.promote_objective or "quality"
 
@@ -542,6 +541,16 @@ class DSpyAdapter:
             target_quality=self.config.target_quality,
             confidence_z=self.config.confidence_z,
         )
+
+        # Use ProgressReporter if no callback provided but logging is enabled
+        if metrics_callback is None:
+            from turbo_gepa.logging import LogLevel, ProgressReporter, StdOutLogger
+            # Create a basic logger if we don't have access to one (DSpyAdapter doesn't seem to hold one)
+            # But we can create a temporary one or just skip default reporting if preferred.
+            # For consistency with DefaultAdapter, let's try to provide basic stdout reporting.
+            logger = StdOutLogger(min_level=LogLevel.INFO)
+            metrics_callback = ProgressReporter(logger)
+
         return Orchestrator(
             config=self.config,
             evaluator=evaluator,
@@ -550,6 +559,7 @@ class DSpyAdapter:
             mutator=self.mutator,
             cache=self.cache,
             control_dir=self.control_dir,
+            metrics_callback=metrics_callback,
         )
 
     async def optimize_async(
@@ -558,7 +568,9 @@ class DSpyAdapter:
         *,
         max_rounds: int | None = None,
         max_evaluations: int | None = None,
+        max_cost: float | None = None,  # New cost limit
         reflection_lm: Callable | None = None,
+        metrics_callback: Callable | None = None,
     ) -> dict[str, Any]:
         """
         Optimize DSPy program instructions asynchronously.
@@ -567,19 +579,25 @@ class DSpyAdapter:
             seed_instructions: Initial instructions for each predictor
             max_rounds: Maximum optimization rounds
             max_evaluations: Maximum evaluations budget
+            max_cost: Maximum cost in USD
             reflection_lm: Optional async LLM function for reflection
                           (prompt: str) -> str. If provided with feedback_map,
                           enables LLM-based instruction proposal.
+            metrics_callback: Optional callback for progress updates (e.g. for viz dashboard)
 
         Returns:
             Dict with 'best_program', 'best_instructions', 'pareto', 'archive'
         """
+        # Apply runtime overrides to config
+        if max_cost is not None:
+            self.config.max_total_cost_dollars = float(max_cost)
+
         # Set reflection LLM if provided
         if reflection_lm is not None:
             self.reflection_lm = reflection_lm
         import json
 
-        orchestrator = self._build_orchestrator(max_rounds=max_rounds or 100)
+        orchestrator = self._build_orchestrator(max_rounds=max_rounds or 100, metrics_callback=metrics_callback)
 
         # Create seed candidate (JSON-encoded instructions)
         seed_text = json.dumps(seed_instructions)
@@ -620,6 +638,7 @@ class DSpyAdapter:
             "qd_elites": [],  # Deprecated
             "archive": orchestrator.archive,
             "orchestrator": orchestrator,
+            "metrics": orchestrator.metrics_snapshot(), # Add metrics snapshot to return value
         }
 
     def optimize(
@@ -628,7 +647,9 @@ class DSpyAdapter:
         *,
         max_rounds: int | None = None,
         max_evaluations: int | None = None,
+        max_cost: float | None = None,
         reflection_lm: Callable | None = None,
+        metrics_callback: Callable | None = None,
     ) -> dict[str, Any]:
         """
         Optimize DSPy program instructions (sync wrapper).
@@ -637,7 +658,9 @@ class DSpyAdapter:
             seed_instructions: Initial instructions for each predictor
             max_rounds: Maximum optimization rounds
             max_evaluations: Maximum evaluations budget
+            max_cost: Maximum cost in USD
             reflection_lm: Optional async LLM function for reflection
+            metrics_callback: Optional callback for progress updates
 
         Returns:
             Dict with 'best_program', 'best_instructions', 'pareto', 'archive'
@@ -647,6 +670,8 @@ class DSpyAdapter:
                 seed_instructions,
                 max_rounds=max_rounds,
                 max_evaluations=max_evaluations,
+                max_cost=max_cost,
                 reflection_lm=reflection_lm,
+                metrics_callback=metrics_callback,
             )
         )
