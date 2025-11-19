@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TurboGEPA Mission Control</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>
+        /* Cyberpunk / Sci-Fi Theme Overrides */
+        :root {
+            --bg-dark: #050505;
+            --bg-panel: #0A0A0A;
+            --accent-primary: #00F0FF;
+            --accent-secondary: #7000FF;
+            --accent-success: #00FF94;
+            --accent-warn: #FF003C;
+            --grid-color: rgba(40, 40, 40, 0.5);
+        }
+        body {
+            background-color: var(--bg-dark);
+            color: #e0e0e0;
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+        }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        
+        /* Neon Glows */
+        .glow-text { text-shadow: 0 0 10px rgba(0, 240, 255, 0.5); }
+        .glow-border { border: 1px solid rgba(0, 240, 255, 0.3); box-shadow: 0 0 15px rgba(0, 240, 255, 0.1); }
+        
+        .panel {
+            background: var(--bg-panel);
+            border: 1px solid #222;
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+        }
+        .panel::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, var(--accent-primary), transparent);
+            opacity: 0.5;
+        }
+
+        /* Grid Background */
+        .bg-grid {
+            background-image: linear-gradient(var(--grid-color) 1px, transparent 1px),
+            linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
+            background-size: 40px 40px;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #000; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent-primary); }
+    </style>
+</head>
+<body>
+    <div id="app" class="h-screen flex flex-col bg-grid">
+        <!-- Top Bar -->
+        <header class="h-14 border-b border-gray-800 bg-black/80 backdrop-blur flex items-center px-6 justify-between z-50">
+            <div class="flex items-center gap-4">
+                <img src="/assets/turbo_gepa_logo_transparent.png" alt="TurboGEPA" class="h-8">
+                <h1 class="text-xl font-bold tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-600">
+                    TURBO<span class="font-light text-white">GEPA</span>
+                </h1>
+                <div class="h-6 w-px bg-gray-800"></div>
+                <div class="flex items-center gap-2 text-xs mono">
+                    <span class="text-gray-500">RUN_ID:</span>
+                    <span class="text-cyan-400">{{ activeRunId || 'SEARCHING...' }}</span>
+                </div>
+                <div v-if="isConnected" class="flex items-center gap-2 px-2 py-1 rounded bg-green-900/20 border border-green-800">
+                    <div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                    <span class="text-xs text-green-400 font-bold">LIVE</span>
+                </div>
+                <div v-else class="flex items-center gap-2 px-2 py-1 rounded bg-red-900/20 border border-red-800">
+                    <div class="w-2 h-2 rounded-full bg-red-500"></div>
+                    <span class="text-xs text-red-400 font-bold">DISCONNECTED</span>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-6 text-sm mono">
+                <div class="flex flex-col items-end">
+                    <span class="text-gray-500 text-[10px] uppercase">Total Evals</span>
+                    <span class="text-white font-bold">{{ totalEvals }}</span>
+                </div>
+                <div class="flex flex-col items-end">
+                    <span class="text-gray-500 text-[10px] uppercase">Best Quality</span>
+                    <span class="text-cyan-400 font-bold text-lg">{{ (bestQuality * 100).toFixed(1) }}%</span>
+                </div>
+                <div class="flex flex-col items-end">
+                    <span class="text-gray-500 text-[10px] uppercase">Runtime</span>
+                    <span class="text-white">{{ runtime }}</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="flex-1 flex overflow-hidden">
+            <!-- Left: Graph & Lineage -->
+            <div class="flex-1 flex flex-col relative border-r border-gray-800">
+                <div class="absolute top-4 left-4 z-10 flex gap-2">
+                    <div class="panel px-3 py-2 bg-black/90">
+                        <div class="text-[10px] text-gray-500 uppercase tracking-wider">Population</div>
+                        <div class="text-xl font-bold text-white">{{ nodeCount }}</div>
+                    </div>
+                    <div class="panel px-3 py-2 bg-black/90">
+                        <div class="text-[10px] text-gray-500 uppercase tracking-wider">Generations</div>
+                        <div class="text-xl font-bold text-purple-400">{{ maxGeneration }}</div>
+                    </div>
+                </div>
+                <div id="cy" class="w-full h-full bg-black/20"></div>
+            </div>
+
+            <!-- Right: Telemetry & Details -->
+            <div class="w-[450px] flex flex-col bg-black/50 backdrop-blur-sm">
+                <!-- Telemetry Charts -->
+                <div class="h-1/2 border-b border-gray-800 p-4 flex flex-col gap-4">
+                    <div class="flex justify-between items-center">
+                        <h3 class="text-xs font-bold text-gray-400 uppercase flex items-center gap-2">
+                            <span class="w-2 h-2 bg-blue-500 rounded-sm"></span> System Vitals
+                        </h3>
+                    </div>
+                    <!-- Charts Grid -->
+                    <div class="grid grid-cols-2 gap-2 h-full">
+                        <div class="panel p-2 flex flex-col">
+                            <div class="text-[10px] text-gray-500 mb-1">Throughput (EPS)</div>
+                            <div id="chart-eps" class="flex-1 w-full"></div>
+                            <div class="text-right text-xs font-bold text-white">{{ currentEPS.toFixed(1) }}</div>
+                        </div>
+                        <div class="panel p-2 flex flex-col">
+                            <div class="text-[10px] text-gray-500 mb-1">Latency (P95)</div>
+                            <div id="chart-latency" class="flex-1 w-full"></div>
+                            <div class="text-right text-xs font-bold text-yellow-400">{{ currentLatency.toFixed(2) }}s</div>
+                        </div>
+                        <div class="panel p-2 flex flex-col col-span-2 h-24">
+                             <div class="text-[10px] text-gray-500 mb-1">Quality Convergence (Best So Far)</div>
+                             <div id="chart-quality" class="flex-1 w-full"></div>
+                        </div>
+                        <div class="panel p-2 flex flex-col col-span-2">
+                            <div class="flex justify-between">
+                                <div class="text-[10px] text-gray-500">Queue Pressure</div>
+                                <div class="text-[10px] text-cyan-500">{{ queueDepth }} Pending</div>
+                            </div>
+                            <!-- Simple Queue Bar Visualization -->
+                            <div class="flex h-full items-end gap-1 mt-2">
+                                <div class="w-full bg-gray-800 h-2 rounded overflow-hidden relative">
+                                    <div class="absolute top-0 left-0 h-full bg-cyan-500 transition-all duration-500" :style="{width: Math.min(100, (queueDepth / 200) * 100) + '%'}"></div>
+                                </div>
+                            </div>
+                            <div class="flex justify-between text-[10px] mt-1 text-gray-400">
+                                <span>Inflight: {{ inflightCount }}</span>
+                                <span>Limit: {{ concurrencyLimit }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Node Details -->
+                <div class="flex-1 p-4 overflow-y-auto">
+                    <div v-if="selectedNode" class="flex flex-col gap-4">
+                        <div class="panel p-4 border-l-2 border-cyan-500">
+                            <div class="flex justify-between items-start mb-2">
+                                <div>
+                                    <div class="text-xs text-cyan-400 font-bold mono mb-1">{{ selectedNode.fingerprint?.substring(0, 8) }}</div>
+                                    <div class="text-[10px] text-gray-500 uppercase">Candidate ID</div>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-xl font-bold text-white">{{ (selectedNode.quality * 100).toFixed(1) }}%</div>
+                                    <div class="text-[10px] text-gray-500 uppercase">Quality Score</div>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-2 text-xs mt-3 pt-3 border-t border-gray-800">
+                                <div>
+                                    <span class="text-gray-500">Generation:</span> <span class="text-white">{{ selectedNode.generation }}</span>
+                                </div>
+                                <div>
+                                    <span class="text-gray-500">Island:</span> <span class="text-purple-400">{{ selectedNode.current_island ?? '?' }}</span>
+                                </div>
+                                <div>
+                                    <span class="text-gray-500">Shard:</span> <span class="text-green-400">{{ ((selectedNode.shard_fraction||0)*100).toFixed(0) }}%</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex flex-col gap-2">
+                            <div class="text-xs font-bold text-gray-400 uppercase">Prompt Content</div>
+                            <div class="panel p-3 text-xs mono text-gray-300 whitespace-pre-wrap max-h-[400px] overflow-y-auto leading-relaxed">
+                                {{ selectedNode.prompt_full || selectedNode.prompt || selectedNode.text || '(empty)' }}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div v-else class="h-full flex flex-col items-center justify-center text-gray-600">
+                        <svg class="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                        <p class="text-sm font-medium">Select a node to inspect</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, computed, watch } = Vue;
+
+        createApp({
+            setup() {
+                const activeRunId = ref(null);
+                const isConnected = ref(false);
+                const telemetryHistory = ref([]);
+                const evolutionData = ref(null);
+                const selectedNode = ref(null);
+                
+                // Stats
+                const totalEvals = ref(0);
+                const bestQuality = ref(0);
+                const runtime = ref("00:00");
+                const nodeCount = ref(0);
+                const maxGeneration = ref(0);
+                
+                // Real-time metrics
+                const currentEPS = ref(0);
+                const currentLatency = ref(0);
+                const queueDepth = ref(0);
+                const inflightCount = ref(0);
+                const concurrencyLimit = ref(0);
+
+                // ECharts instances
+                let chartEPS = null;
+                let chartLatency = null;
+                let chartQuality = null;
+                let cy = null;
+
+                const initCharts = () => {
+                    const commonOption = {
+                        grid: { top: 5, bottom: 0, left: 0, right: 0 },
+                        xAxis: { type: 'category', show: false },
+                        yAxis: { type: 'value', show: false, min: 0 },
+                        series: [{
+                            type: 'line',
+                            smooth: true,
+                            showSymbol: false,
+                            areaStyle: { opacity: 0.2 },
+                            lineStyle: { width: 2 }
+                        }]
+                    };
+
+                    chartEPS = echarts.init(document.getElementById('chart-eps'));
+                    chartEPS.setOption({
+                        ...commonOption,
+                        series: [{ ...commonOption.series[0], itemStyle: { color: '#3b82f6' } }]
+                    });
+
+                    chartLatency = echarts.init(document.getElementById('chart-latency'));
+                    chartLatency.setOption({
+                        ...commonOption,
+                        series: [{ ...commonOption.series[0], itemStyle: { color: '#facc15' } }]
+                    });
+
+                    chartQuality = echarts.init(document.getElementById('chart-quality'));
+                    chartQuality.setOption({
+                        ...commonOption,
+                        tooltip: { show: true, trigger: 'axis', formatter: '{b}s: {c}%' },
+                        series: [{ 
+                            type: 'line',
+                            smooth: true,
+                            showSymbol: false,
+                            areaStyle: { opacity: 0.2, color: 'rgba(0, 240, 255, 0.2)' },
+                            lineStyle: { width: 2, color: '#00F0FF' }
+                        }]
+                    });
+                };
+
+                const initCytoscape = () => {
+                    cy = cytoscape({
+                        container: document.getElementById('cy'),
+                        style: [
+                            {
+                                selector: 'node',
+                                style: {
+                                    'background-color': '#1a1a1a',
+                                    'border-width': 2,
+                                    'border-color': '#444',
+                                    'label': 'data(label)',
+                                    'color': '#888',
+                                    'font-size': 10,
+                                    'width': 30,
+                                    'height': 30,
+                                    'text-valign': 'bottom',
+                                    'text-margin-y': 5
+                                }
+                            },
+                            {
+                                selector: 'node[quality > 0.8]',
+                                style: { 'border-color': '#00F0FF', 'background-color': '#003333' }
+                            },
+                            {
+                                selector: 'node:selected',
+                                style: {
+                                    'border-width': 4,
+                                    'border-color': '#fff',
+                                    'width': 40, 'height': 40,
+                                    'shadow-blur': 10, 'shadow-color': '#00F0FF'
+                                }
+                            },
+                            {
+                                selector: 'edge',
+                                style: {
+                                    'width': 2,
+                                    'line-color': '#333',
+                                    'target-arrow-color': '#333',
+                                    'target-arrow-shape': 'triangle',
+                                    'curve-style': 'bezier'
+                                }
+                            }
+                        ],
+                        layout: { name: 'dagre', rankDir: 'LR', nodeSep: 50, rankSep: 100 }
+                    });
+
+                    cy.on('tap', 'node', (evt) => {
+                        selectedNode.value = evt.target.data('raw');
+                    });
+                };
+
+                const updateCharts = (history, timeline) => {
+                    if (!chartEPS || !chartLatency) return;
+                    
+                    // Keep last 60 points
+                    const dataEPS = history.slice(-60).map(h => h.eval_rate_eps);
+                    const dataLat = history.slice(-60).map(h => h.latency_p95);
+                    
+                    chartEPS.setOption({ series: [{ data: dataEPS }] });
+                    chartLatency.setOption({ series: [{ data: dataLat }] });
+
+                    if (chartQuality && timeline) {
+                        const dataQuality = timeline.map(t => (t.best_quality * 100).toFixed(1));
+                        // Just use indices or elapsed time for X
+                        // echarts 'category' axis expects labels in data or separate axis data
+                        // Here we just let it be category by default (1, 2, 3...)
+                        chartQuality.setOption({
+                             series: [{ data: dataQuality }] 
+                        });
+                    }
+                };
+
+                const updateGraph = (data) => {
+                    if (!data || !data.lineage) return;
+                    
+                    const nodes = [];
+                    const edges = [];
+                    const existingIds = new Set(cy.nodes().map(n => n.id()));
+                    
+                    // Process nodes
+                    data.lineage.forEach(item => {
+                        if (existingIds.has(item.fingerprint)) return; // Skip existing
+                        
+                        let label = item.generation === 0 ? "SEED" : `G${item.generation}`;
+                        
+                        nodes.push({
+                            data: {
+                                id: item.fingerprint,
+                                label: label,
+                                quality: item.quality || 0,
+                                raw: item
+                            }
+                        });
+                    });
+                    
+                    // Process edges (parent -> child)
+                    const parents = data.evolution_stats?.parent_children || {};
+                    Object.entries(parents).forEach(([parent, children]) => {
+                        children.forEach(child => {
+                            const edgeId = `${parent}-${child}`;
+                            if (cy.getElementById(edgeId).empty()) {
+                                edges.push({ data: { id: edgeId, source: parent, target: child } });
+                            }
+                        });
+                    });
+
+                    if (nodes.length > 0 || edges.length > 0) {
+                        cy.add([...nodes, ...edges]);
+                        
+                        // Only re-run layout if significant changes or first load
+                        if (nodes.length > 0) {
+                            cy.layout({ name: 'dagre', rankDir: 'LR', animate: true, animationDuration: 500 }).run();
+                        }
+                        
+                        // Stats update
+                        nodeCount.value = data.lineage.length;
+                        maxGeneration.value = Math.max(...data.lineage.map(n => n.generation || 0));
+                    }
+                };
+
+                const fetchData = async () => {
+                    try {
+                        // 1. Get Active Run ID if not set
+                        if (!activeRunId.value) {
+                            const statusRes = await fetch('/api/status');
+                            const statusData = await statusRes.json();
+                            if (statusData.active_run_id) {
+                                activeRunId.value = statusData.active_run_id;
+                            }
+                        }
+
+                        if (!activeRunId.value) return;
+
+                        // 2. Fetch merged telemetry
+                        const res = await fetch(`/api/telemetry/${activeRunId.value}`);
+                        const data = await res.json();
+                        isConnected.value = true;
+
+                        // Update Telemetry
+                        const latestTelem = data.telemetry?.[data.telemetry.length - 1];
+                        if (latestTelem) {
+                            currentEPS.value = latestTelem.eval_rate_eps || 0;
+                            currentLatency.value = latestTelem.latency_p95 || 0;
+                            queueDepth.value = (latestTelem.queue_ready || 0) + (latestTelem.queue_mutation || 0);
+                            inflightCount.value = latestTelem.inflight_requests || 0;
+                            concurrencyLimit.value = latestTelem.concurrency_limit || 0;
+                            
+                            // Push to history for charts
+                            telemetryHistory.value.push(latestTelem);
+                            // Pass evolution timeline if available
+                            updateCharts(telemetryHistory.value, data.evolution?.timeline);
+                        } else {
+                            // Graceful fallback for runs without telemetry
+                            isConnected.value = true; // We found the run, even if no live telemetry
+                        }
+
+                        // Update Evolution Data
+                        if (data.evolution) {
+                            evolutionData.value = data.evolution;
+                            const meta = data.evolution.run_metadata || {};
+                            totalEvals.value = meta.evaluations || 0;
+                            bestQuality.value = meta.best_quality || 0;
+                            
+                            // Runtime fallback if no telemetry
+                            if (!latestTelem && data.evolution.timeline?.length) {
+                                const lastSnap = data.evolution.timeline[data.evolution.timeline.length - 1];
+                                const diff = lastSnap.elapsed || 0;
+                                const mins = Math.floor(diff / 60).toString().padStart(2, '0');
+                                const secs = Math.floor(diff % 60).toString().padStart(2, '0');
+                                runtime.value = `${mins}:${secs}`;
+                            }
+                            
+                            updateGraph(data.evolution);
+                        }
+                        
+                        // Calc runtime from telemetry if available
+                        if (latestTelem) {
+                            const start = telemetryHistory.value[0]?.timestamp || latestTelem.timestamp;
+                            const diff = latestTelem.timestamp - start;
+                            const mins = Math.floor(diff / 60).toString().padStart(2, '0');
+                            const secs = Math.floor(diff % 60).toString().padStart(2, '0');
+                            runtime.value = `${mins}:${secs}`;
+                        }
+
+                    } catch (e) {
+                        console.error("Fetch error", e);
+                        isConnected.value = false;
+                    }
+                };
+
+                onMounted(() => {
+                    initCharts();
+                    initCytoscape();
+                    setInterval(fetchData, 500); // Fast poll 2Hz
+                });
+
+                return {
+                    activeRunId, isConnected,
+                    totalEvals, bestQuality, runtime, nodeCount, maxGeneration,
+                    currentEPS, currentLatency, queueDepth, inflightCount, concurrencyLimit,
+                    selectedNode
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
