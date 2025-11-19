@@ -60,4 +60,5 @@ def generate_markdown_report(orchestrator: Orchestrator) -> str:
             "## 🛠️ Mutation Strategy Effectiveness",
             "",
             "| Strategy | Count |",
-            "| :--- | :--- |
+            "| :--- | :--- |",
+        ])
