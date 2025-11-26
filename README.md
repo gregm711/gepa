@@ -22,7 +22,7 @@
 
 - ⚡ **Maximized Concurrency**: Async orchestration scales to available compute (bounded by shard size + `max_total_inflight` per island)
 - 🏝️ **Island-Based Parallelism**: Concurrent islands broadcast elites across the swarm to preserve diversity without extra processes
-- 📊 **ASHA Successive Halving**: Prunes most underperformers early to reduce wasted evaluations
+- 📊 **ASHA-Style Ladder**: Parent-gated rung promotions prune weak lineages early without cohort halving
 - 🧬 **Dual Mutation Strategy**: Blends reflection edits with Prompt-MII-style spec induction for exploration vs. exploitation
 - 📈 **Parent-Weighted Scheduling**: Recent improvement history boosts promising lineages to the front of the queue
 - 🌡️ **Two-Phase Optimization**: Prompt evolution first, optional temperature sweep second
@@ -304,8 +304,8 @@ best_program = result['best_program']
 TurboGEPA is a high-throughput production fork of GEPA with:
 
 - **Async/await architecture** - Non-blocking I/O for maximum concurrency
-- **Multi-island parallelism** - Concurrent islands within a single process (async ring)
-- **ASHA successive halving** - Early stopping to reduce wasted evaluations
+- **Multi-island parallelism** - Concurrent islands within a single process; elites broadcast to all peers by default
+- **ASHA-style rung ladder** - Parent-gated promotions with variance tolerance instead of cohort halving
 - **Adaptive configuration** - Auto-tunes based on dataset size and hardware
 
 **Best for**: Production deployments, large-scale optimization, maximum throughput
@@ -316,8 +316,8 @@ TurboGEPA is a high-throughput production fork of GEPA with:
 | --------------------- | -------------------- | -------------------------------------------- |
 | **Concurrency Model** | Thread pool (~4-8)   | Adaptive async (scales to available compute) |
 | **Parallelism**       | Single-threaded      | Multi-island (1-8+ islands, adaptive)        |
-| **Early Stopping**    | None                 | ASHA successive halving (60%+ pruning)       |
-| **Archive**           | Pareto frontier only | Pareto frontier with variance tracking       |
+| **Early Stopping**    | None                 | ASHA-style rung ladder (parent-gated)        |
+| **Archive**           | Pareto frontier only | Pareto frontier with shard-aware replacement |
 | **Typical Speedup**   | 1x baseline          | **3-10x faster** wall time                   |
 
 ---
@@ -375,7 +375,7 @@ Need a turnkey Modal deployment? See `examples/modal_turbo_aime.py` for a distri
 - **`DefaultAdapter`**: Single-component prompt optimization with auto-config
 
   - Location: `src/turbo_gepa/adapters/default_adapter.py`
-  - Features: Async evaluation, multi-island, ASHA pruning
+  - Features: Async evaluation, multi-island, ASHA-style rung gating
   - Example: see the Quick Start snippet above
 
 - **`DSpyAdapter`**: DSPy program instruction optimization
@@ -579,60 +579,36 @@ When `optimize_temperature_after_convergence=True`, TurboGEPA freezes prompt exp
 
 TurboGEPA adds **performance engineering** without changing core algorithm:
 
-#### 1. ASHA Successive Halving
+#### 1. ASHA-Style Ladder (Parent-Gated Promotion)
 
 ```mermaid
 graph TD
-    Start[100 Candidates Start] --> Rung1
+    Eval[Evaluate candidate on rung_i<br/>shard fraction] --> Gate{Parent-aware gate}
+    Gate -->|Seed| PromoteSeed[Promote to rung_{i+1}]
+    Gate -->|Child score ≥ parent@rung_i − tol| PromoteVar[Promote to rung_{i+1}]
+    Gate -->|Child score < parent@rung_i − tol| Prune[Prune candidate]
+    Gate -->|Final rung reached| Complete[Mark completed<br/>archive + coverage stats]
 
-    subgraph Rung1[" Rung 1: 5% Dataset "]
-        direction TB
-        Eval1[Evaluate ALL 100 Candidates<br/>on 5% of data]
-        Eval1 --> Results1[Rank by Performance]
-        Results1 --> Keep1[✅ Keep Top 40<br/>40%]
-        Results1 --> Drop1[❌ Drop Bottom 60<br/>60%]
-    end
-
-    Keep1 --> Rung2
-
-    subgraph Rung2[" Rung 2: 20% Dataset "]
-        direction TB
-        Eval2[Evaluate Top 40 Candidates<br/>on 20% of data]
-        Eval2 --> Results2[Rank by Performance]
-        Results2 --> Keep2[✅ Keep Top 16<br/>40%]
-        Results2 --> Drop2[❌ Drop Bottom 24<br/>60%]
-    end
-
-    Keep2 --> Rung3
-
-    subgraph Rung3[" Rung 3: 100% Dataset "]
-        direction TB
-        Eval3[Evaluate Top 16 Candidates<br/>on 100% of data]
-        Eval3 --> Results3[Final Ranking]
-        Results3 --> Final[🏆 16 Elite Candidates<br/>Fully Evaluated]
-    end
-
-    Final --> Archive[Add to Archive]
-
-    style Start fill:#e1f5ff
-    style Rung1 fill:#fff3cd
-    style Rung2 fill:#ffeaa7
-    style Rung3 fill:#d4edda
-    style Keep1 fill:#b2fab4
-    style Keep2 fill:#b2fab4
-    style Drop1 fill:#fab1a0
-    style Drop2 fill:#fab1a0
-    style Final fill:#55efc4
-    style Archive fill:#74b9ff
+    style Eval fill:#fff3cd
+    style Gate fill:#ffeaa7
+    style PromoteSeed fill:#b2fab4
+    style PromoteVar fill:#b2fab4
+    style Prune fill:#fab1a0
+    style Complete fill:#55efc4
 ```
 
-**Efficiency Gain**:
+**What actually happens in code** (mirrors `src/turbo_gepa/scheduler.py`):
 
-- **Without ASHA**: 100 candidates × 100% data = **100 full evaluations**
-- **With ASHA**: (100 × 5%) + (40 × 20%) + (16 × 100%) = **29 full evaluation equivalents**
-- **Savings**: ~**71% fewer evaluations** while keeping the best candidates
+- Seeds always promote off the first rung; there is **no cohort ranking or fixed top-40% keep rate**.
+- Mutations promote when `child_score >= parent_score_at_same_rung − variance_tolerance[rung]`, so small shards allow a little slop to account for noise.
+- If a parent’s rung score is missing, we shrink its final score toward a baseline via `shrinkage_alpha` to build a comparison target.
+- Final rung is just marked completed (confidence/coverage handled upstream by the evaluator); promotion decisions only happen on earlier rungs.
+- Stagnation guard: if a rung sees several generations with no improvement, the best candidate on that rung is force-promoted to keep the ladder moving; final rung stagnation flips a convergence flag.
 
-**How It Works**: Start with many candidates on cheap evaluations (small shards), progressively promote only the top performers to larger shards (e.g., 40% → 63% → 100% for the 30-example AIME setup). Most poor candidates are eliminated early before wasting compute. On the final rung, TurboGEPA may still early-stop based on confidence and straggler heuristics—especially in speed-first profiles—but conceptually follows the same “few candidates on the expensive rung” pattern.
+**Efficiency Gain** (illustrative ladder):
+
+- **Without rungs**: 100 candidates × 100% data = **100 full evaluations**
+- **With rungs** (example shards 0.05 → 0.20 → 1.0): (100 × 5%) + (100 × 20% gated by parents, many pruned early) + (survivors × 100%) ≈ **~70% fewer full equivalents** in practice, while still pushing promising lineages upward.
 
 #### 2. Async Orchestration
 
@@ -669,9 +645,9 @@ The adaptive configuration gives you a strong starting point, but you should sti
 from turbo_gepa.config import Config
 
 config = Config(
-    eval_concurrency=64,        # Concurrent evaluations per island (64-128 default)
-    n_islands=4,                # Number of parallel islands (1-4 default)
-    shards=(0.05, 0.2, 1.0),    # ASHA evaluation shards
+    eval_concurrency=64,        # Concurrent evaluations per island (default=20; raise if your quota allows)
+    n_islands=4,                # Number of parallel islands (default=4; typical 1-4)
+    shards=(0.05, 0.2, 1.0),    # ASHA evaluation shards (auto-tuned when auto_config=True)
     migration_period=1,         # Evaluation batches between migrations (default: 1 = every batch)
     reflection_batch_size=6,    # Examples per reflection
     batch_size=8,               # Evaluation batch size
@@ -1008,7 +984,7 @@ TurboGEPA's contributions are limited to **performance engineering**:
 
 - Async/await orchestration
 - Island-based parallelism
-- ASHA successive halving
+- ASHA-style rung gating
 - Adaptive configuration
 
 ---

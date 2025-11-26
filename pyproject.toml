@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 #replace_package_name_marker
 name="turbo-gepa"
 #replace_package_version_marker
-version="0.1.0"
+version="0.1.1"
 description = "High-throughput prompt evolution framework - production fork of GEPA with island-based parallelism, async orchestration, and ASHA successive halving."
 readme = "README.md"
 authors = [
