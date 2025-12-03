@@ -302,6 +302,21 @@ class DSpyAdapter:
         result["input"] = str(example.inputs())
         result["expected_answer"] = str(example.labels()) if hasattr(example, "labels") else ""
 
+        # Surface model output for downstream reflection/prompts.
+        # DSPy predictions may not be plain strings, so fall back to str().
+        prediction = result.get("prediction")
+        if prediction is not None:
+            try:
+                rendered = getattr(prediction, "answer", None)
+                if rendered is None:
+                    # Some DSPy predictors expose .prediction or __dict__ fields; stringify as a fallback.
+                    rendered = getattr(prediction, "prediction", None) or str(prediction)
+                result["output"] = str(rendered)
+                result["response"] = result["output"]
+            except Exception:
+                result["output"] = str(prediction)
+                result["response"] = result["output"]
+
         return result
 
     def _create_reflection_runner(self):

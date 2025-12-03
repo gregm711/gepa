@@ -48,6 +48,11 @@ from turbo_gepa.scoring import SCORE_KEY, ScoringFn
 from turbo_gepa.strategies import ReflectionStrategy
 from turbo_gepa.utils.litellm_client import configure_litellm_client
 
+# Type alias for custom evaluation functions.
+# Takes (model_output, expected_answer, example_payload) and returns metrics dict.
+# Must include at least "quality" key with value 0.0-1.0.
+EvalFn = Callable[[str, str, dict[str, Any]], dict[str, float]]
+
 
 def _detect_fd_guard() -> int | None:
     try:
@@ -153,6 +158,11 @@ class DefaultAdapter:
         auto_config: Enable automatic configuration with principled sharding (default: True)
         scoring_fn: Optional callback accepting a ``ScoringContext`` that returns the
             scalar score to optimize (defaults to ``maximize_metric(\"quality\")``)
+        eval_fn: Optional custom evaluation function for computing quality scores.
+            Use this for non-numeric tasks like text generation, review writing, etc.
+            Signature: ``(model_output: str, expected_answer: str, example: dict) -> dict[str, float]``
+            Must return a dict with at least "quality" key (0.0 to 1.0).
+            If not provided, uses AIME-style numeric answer matching (exact match).
 
     Example usage::
 
@@ -185,6 +195,21 @@ class DefaultAdapter:
             "spec_induction",
             "interleaved_thinking",
         )
+
+        # Custom eval_fn for non-numeric tasks (e.g., text generation, reviews)
+        def my_eval_fn(model_output: str, expected_answer: str, example: dict) -> dict:
+            # Custom scoring logic here
+            has_summary = "summary" in model_output.lower()
+            has_strengths = "strength" in model_output.lower()
+            quality = 0.5 * has_summary + 0.5 * has_strengths
+            return {"quality": quality}
+
+        adapter = DefaultAdapter(
+            dataset=trainset,
+            task_lm="openrouter/google/gemini-flash-1.5",
+            reflection_lm="openrouter/google/gemini-flash-1.5",
+            eval_fn=my_eval_fn,
+        )
     """
 
     def __init__(
@@ -202,6 +227,7 @@ class DefaultAdapter:
         reflection_lm_temperature: float | None = None,
         auto_config: bool = True,
         scoring_fn: ScoringFn | None = None,
+        eval_fn: EvalFn | None = None,
     ) -> None:
         if not dataset:
             raise ValueError("dataset must contain at least one data instance")
@@ -308,6 +334,9 @@ class DefaultAdapter:
         # No upfront LLM call needed - we optimize prompts first (Phase 1), then temperature (Phase 2)
         self.temperature_supported = True  # Assume supported, check later if needed
         self._temperature_warned = False
+
+        # Custom evaluation function for non-numeric tasks
+        self._eval_fn = eval_fn
 
         # Configure reflection/spec strategies
         self._reflection_strategies: tuple[ReflectionStrategy, ...] = tuple(self.config.reflection_strategies or ())
@@ -1130,20 +1159,27 @@ class DefaultAdapter:
                 cost_usd = 0.0
 
             answer_field = example.get("answer")
-            expected_token = _extract_numeric_answer(answer_field)
-            preferred_len = len(expected_token) if expected_token is not None else None
-            actual_token = _extract_numeric_answer(model_output, preferred_length=preferred_len)
 
-            if expected_token is not None:
-                if actual_token is not None:
-                    quality = 1.0 if expected_token == actual_token else 0.0
-                else:
-                    digits_only = "".join(ch for ch in (model_output or "") if ch.isdigit())
-                    quality = 1.0 if expected_token and expected_token in digits_only else 0.0
+            # Use custom eval_fn if provided, otherwise fall back to AIME-style numeric matching
+            if self._eval_fn is not None:
+                eval_metrics = self._eval_fn(model_output or "", str(answer_field or ""), example)
+                quality = float(eval_metrics.get("quality", 0.0))
             else:
-                haystack = (model_output or "").lower()
-                needle = str(answer_field or "").lower()
-                quality = 1.0 if needle and needle in haystack else 0.0
+                # Default: AIME-style numeric answer matching
+                expected_token = _extract_numeric_answer(answer_field)
+                preferred_len = len(expected_token) if expected_token is not None else None
+                actual_token = _extract_numeric_answer(model_output, preferred_length=preferred_len)
+
+                if expected_token is not None:
+                    if actual_token is not None:
+                        quality = 1.0 if expected_token == actual_token else 0.0
+                    else:
+                        digits_only = "".join(ch for ch in (model_output or "") if ch.isdigit())
+                        quality = 1.0 if expected_token and expected_token in digits_only else 0.0
+                else:
+                    haystack = (model_output or "").lower()
+                    needle = str(answer_field or "").lower()
+                    quality = 1.0 if needle and needle in haystack else 0.0
 
             metrics = {
                 "quality": quality,

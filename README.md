@@ -226,13 +226,66 @@ seed_prompt = "You are a helpful assistant. Provide your final answer as '### <a
 result = adapter.optimize(seeds=[seed_prompt])
 ```
 
-### Customize scoring and rewards
+### Custom evaluation for non-numeric tasks (`eval_fn`)
 
-TurboGEPA always optimizes a single scalar, but you control how that scalar is computed.
-Both `DefaultAdapter` and `DSpyAdapter` accept a `scoring_fn` argument (propagated to
-`Config.scoring_fn`) that receives a `ScoringContext` with the candidate, rung metadata,
-coverage fraction, and the raw objectives produced by your evaluator. Return whatever
-float best matches your north-star reward.
+**IMPORTANT**: By default, `DefaultAdapter` uses AIME-style numeric answer matching
+(looking for `### <number>` or `\boxed{...}` patterns). This works great for math
+problems but **returns quality=0.0 for text generation tasks** like review writing,
+summarization, code generation, etc.
+
+For non-numeric tasks, provide a custom `eval_fn`:
+
+```python
+from turbo_gepa.adapters import DefaultAdapter
+from typing import Any
+
+def evaluate_text_quality(model_output: str, expected_answer: str, example: dict[str, Any]) -> dict[str, float]:
+    """Custom evaluation for text generation tasks.
+
+    Args:
+        model_output: The LLM's response
+        expected_answer: The expected answer from the dataset
+        example: The full example dict with 'input', 'answer', etc.
+
+    Returns:
+        Dict with at least 'quality' key (0.0 to 1.0)
+    """
+    # Example: heuristic scoring for review generation
+    score = 0.0
+    output_lower = model_output.lower()
+
+    # Check for required sections
+    if "summary" in output_lower:
+        score += 0.25
+    if "strength" in output_lower:
+        score += 0.25
+    if "weakness" in output_lower:
+        score += 0.25
+    if "recommend" in output_lower:
+        score += 0.25
+
+    return {"quality": score}
+
+adapter = DefaultAdapter(
+    dataset=trainset,
+    task_lm="openrouter/openai/gpt-oss-120b:nitro",
+    reflection_lm="openrouter/x-ai/grok-4-fast",
+    eval_fn=evaluate_text_quality,  # Custom evaluation!
+)
+```
+
+**When to use `eval_fn`**:
+- Text generation (essays, reviews, summaries)
+- Code generation
+- Any task where the output isn't a single numeric answer
+- Tasks requiring semantic similarity or custom metrics
+
+### Customize scoring and rewards (`scoring_fn`)
+
+While `eval_fn` controls **how quality is computed** for each example, `scoring_fn`
+controls **how candidates are selected** for evolution. The `scoring_fn` operates on
+already-computed objectives (after `eval_fn` has run) to produce a single scalar for
+candidate ranking.
 
 ```python
 from turbo_gepa.adapters import DefaultAdapter
@@ -251,6 +304,10 @@ adapter = DefaultAdapter(
     scoring_fn=reward,
 )
 ```
+
+**Key difference**:
+- **`eval_fn`**: Computes raw metrics (quality, tokens, etc.) from LLM output
+- **`scoring_fn`**: Combines already-computed metrics into a single score for selection
 
 Need the classic behavior? Use the helper `from turbo_gepa.scoring import maximize_metric`
 to promote any metric key (e.g., `"accuracy"`, `"reward"`, `"bleu"`). DSPy runs use the same
@@ -875,6 +932,94 @@ Current OSS‑20 results (train split, 30 examples, fresh cache):
 | TurboGEPA  | 207 s   | 10 evaluations to target (48 mutations, 3 promotions) | 0.885 | 3 promotions (out of 48 streamed mutations) | 0.73 (22/30) |
 
 \*GEPA’s 150 metric calls across 30 problems effectively translate to about 3 “real” evolution steps per seed; TurboGEPA hit the 0.733 target after 7 evaluations (time-to-target ≈145 s) with three promoted children, demonstrating why prioritization + aggressive concurrency accelerates the north star metric.
+
+---
+
+## 🔧 Troubleshooting
+
+### Quality is always 0.0
+
+**Symptom**: Your optimization runs but `best_quality` is always 0.0.
+
+**Cause**: `DefaultAdapter` uses AIME-style numeric answer matching by default. It looks for
+patterns like `### 42` or `\boxed{123}` and returns 0.0 if the output doesn't contain these.
+
+**Solution**: For non-numeric tasks (text generation, reviews, code, etc.), provide a custom
+`eval_fn` that computes quality appropriately:
+
+```python
+def my_eval_fn(model_output: str, expected_answer: str, example: dict) -> dict[str, float]:
+    # Your custom quality logic here
+    quality = compute_quality(model_output, expected_answer)
+    return {"quality": quality}
+
+adapter = DefaultAdapter(
+    dataset=trainset,
+    task_lm=task_lm,
+    reflection_lm=reflection_lm,
+    eval_fn=my_eval_fn,  # Custom evaluation
+)
+```
+
+### OpenRouter authentication errors
+
+**Symptom**: `AuthenticationError: OpenrouterException - {"error":{"message":"No cookie auth credentials found","code":401}}`
+
+**Cause**: When using OpenRouter with DSPy or litellm, the API key may not be correctly
+propagated through all layers.
+
+**Solution**: Explicitly set the `OPENROUTER_API_KEY` environment variable before creating
+adapters:
+
+```python
+import os
+
+# Ensure API key is in environment for litellm/DSPy compatibility
+api_key = os.environ.get("OPENROUTER_API_KEY")
+if api_key:
+    os.environ["OPENROUTER_API_KEY"] = api_key  # Re-set to ensure it's available
+
+# Now create your adapter
+adapter = DefaultAdapter(...)
+```
+
+For DSPy specifically, also configure `dspy.LM` with explicit credentials:
+
+```python
+import dspy
+import os
+
+dspy.configure(lm=dspy.LM(
+    model="openrouter/x-ai/grok-4-fast",
+    api_base="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY"),
+))
+```
+
+### Reflection produces no mutations
+
+**Symptom**: Logs show "Reflection runner: 0 traces" and optimization makes no progress.
+
+**Cause**: The reflection/mutation system needs example traces to generate improved prompts.
+Without traces, it cannot propose meaningful changes.
+
+**Solution**:
+1. Ensure your dataset has enough examples (at least 3-5)
+2. Check that the seed prompt actually runs successfully (quality > 0.0 on some examples)
+3. For DSPy adapter, ensure trace capture is working (check `bootstrap_trace_data`)
+
+### Model rejects temperature parameter
+
+**Symptom**: Error message about "temperature not supported" or similar.
+
+**Cause**: Some models (especially reasoning models like o1/o3) don't accept temperature.
+
+**Solution**: TurboGEPA auto-detects this and disables temperature optimization. You can
+also explicitly disable it:
+
+```python
+adapter.temperature_supported = False
+```
 
 ---
 

@@ -10,7 +10,11 @@ The `DefaultAdapter` is for optimizing single-component text prompts (e.g., syst
 
 **Location**: `src/turbo_gepa/adapters/default_adapter.py`
 
-**Example**:
+**⚠️ IMPORTANT**: By default, `DefaultAdapter` uses **AIME-style numeric answer matching**
+(looking for `### <number>` or `\boxed{...}`). This returns `quality=0.0` for non-numeric
+tasks! For text generation, reviews, code, etc., you MUST provide a custom `eval_fn`.
+
+**Basic Example (numeric tasks)**:
 ```python
 from turbo_gepa.adapters import DefaultAdapter
 
@@ -22,6 +26,56 @@ adapter = DefaultAdapter(
 
 result = adapter.optimize(seeds=["You are a helpful assistant."])
 ```
+
+**Custom eval_fn Example (text generation tasks)**:
+```python
+from turbo_gepa.adapters import DefaultAdapter
+from typing import Any
+
+def evaluate_review_quality(
+    model_output: str,
+    expected_answer: str,
+    example: dict[str, Any]
+) -> dict[str, float]:
+    """Custom evaluation for text generation tasks.
+
+    Args:
+        model_output: The LLM's response text
+        expected_answer: The expected answer from the dataset (may be unused)
+        example: The full example dict with 'input', 'answer', 'additional_context'
+
+    Returns:
+        Dict with at least 'quality' key (0.0 to 1.0). Can include other metrics
+        like 'tokens', 'latency', etc.
+    """
+    score = 0.0
+    output_lower = model_output.lower()
+
+    # Example: heuristic scoring for review sections
+    if "summary" in output_lower:
+        score += 0.25
+    if "strength" in output_lower:
+        score += 0.25
+    if "weakness" in output_lower:
+        score += 0.25
+    if "recommend" in output_lower:
+        score += 0.25
+
+    return {"quality": score}
+
+adapter = DefaultAdapter(
+    dataset=trainset,
+    task_lm="openrouter/openai/gpt-oss-120b:nitro",
+    reflection_lm="openrouter/x-ai/grok-4-fast",
+    eval_fn=evaluate_review_quality,  # Custom evaluation!
+)
+```
+
+**Key Parameters**:
+- `eval_fn`: Custom function to compute quality from LLM output. Required for non-numeric tasks.
+- `scoring_fn`: Function to combine metrics into a single score for candidate selection.
+  Operates on already-computed objectives (after `eval_fn` runs).
+- `auto_config`: Enable automatic configuration based on dataset size (default: True)
 
 ### DSpyAdapter
 
