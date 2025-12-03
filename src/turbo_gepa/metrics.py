@@ -115,19 +115,12 @@ class Metrics:
         if shard_fraction not in self.rung_baselines:
             self.rung_baselines[shard_fraction] = quality
         target_shard = self.target_shard_fraction or 1.0
-        if (
-            not self.baseline_recorded
-            and shard_fraction + 1e-6 >= target_shard
-        ):
+        if not self.baseline_recorded and shard_fraction + 1e-6 >= target_shard:
             self.baseline_quality = quality if self.baseline_quality == 0.0 else self.baseline_quality
             self.baseline_recorded = True
         eps = 1e-6
-        if (
-            shard_fraction > self.highest_rung_fraction + eps
-            or (
-                abs(shard_fraction - self.highest_rung_fraction) <= eps
-                and quality > self.best_rung_quality
-            )
+        if shard_fraction > self.highest_rung_fraction + eps or (
+            abs(shard_fraction - self.highest_rung_fraction) <= eps and quality > self.best_rung_quality
         ):
             self.highest_rung_fraction = shard_fraction
             self.best_rung_quality = quality
@@ -347,11 +340,7 @@ class Metrics:
         return self.strategy_latency_sum.get(name, 0.0) / n
 
     def turbo_score(self) -> float | None:
-        if (
-            self.target_quality is None
-            or self.time_to_target_seconds is None
-            or self.time_to_target_seconds <= 0
-        ):
+        if self.target_quality is None or self.time_to_target_seconds is None or self.time_to_target_seconds <= 0:
             return None
         gain = self.target_quality - self.baseline_quality
         if gain <= 0:
@@ -448,16 +437,18 @@ class Metrics:
                     f"mean_duration={avg_duration:.1f}s"
                 )
 
-        lines.extend([
-            "",
-            "📊 Scheduler Decisions:",
-            f"  Promoted: {self.candidates_promoted}",
-            f"  Pruned: {self.candidates_pruned}",
-            f"  Completed: {self.candidates_completed}",
-            f"  Promotion rate: {self.promotion_rate:.1%}",
-            f"  Promotions by rung: {dict(self.promotions_by_rung)}",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "📊 Scheduler Decisions:",
+                f"  Promoted: {self.candidates_promoted}",
+                f"  Pruned: {self.candidates_pruned}",
+                f"  Completed: {self.candidates_completed}",
+                f"  Promotion rate: {self.promotion_rate:.1%}",
+                f"  Promotions by rung: {dict(self.promotions_by_rung)}",
+                "",
+            ]
+        )
 
         if self.promotion_attempts_by_rung:
             lines.append("  Rung promotion stats:")
@@ -467,29 +458,32 @@ class Metrics:
                 pruned = self.promotion_pruned_by_rung.get(rung, 0)
                 rate = promoted / attempts if attempts else 0.0
                 lines.append(
-                    f"    rung {rung}: attempts={attempts}, promoted={promoted}, "
-                    f"pruned={pruned}, rate={rate:.1%}"
+                    f"    rung {rung}: attempts={attempts}, promoted={promoted}, pruned={pruned}, rate={rate:.1%}"
                 )
-        lines.extend([
-            "",
-            "🔬 Mutation Generation:",
-            f"  Total mutations: {self.mutations_generated}",
-            f"  Batches: {self.mutation_batches}",
-            f"  Mean latency: {self.mutation_latency_mean:.2f}s",
-            f"  By operator: {dict(self.mutations_by_operator)}",
-            "",
-            "🧠 Reflection Strategies:",
-            f"  Calls: {dict(self.strategy_call_counts)}",
-            "  Mean latency by strategy: {" + ", ".join(f"{k}: {self.strategy_latency_mean(k):.2f}s" for k in self.strategy_call_counts) + "}}",
-            "",
-            "⏱️  Timing Breakdown:",
-            f"  Evaluation: {self.time_eval_total:.1f}s",
-            f"  Mutation: {self.time_mutation_total:.1f}s",
-            f"  Scheduler: {self.time_scheduler_total:.1f}s",
-            f"  Archive: {self.time_archive_total:.1f}s",
-            "",
-            "🎯 Operator Performance:",
-        ])
+        lines.extend(
+            [
+                "",
+                "🔬 Mutation Generation:",
+                f"  Total mutations: {self.mutations_generated}",
+                f"  Batches: {self.mutation_batches}",
+                f"  Mean latency: {self.mutation_latency_mean:.2f}s",
+                f"  By operator: {dict(self.mutations_by_operator)}",
+                "",
+                "🧠 Reflection Strategies:",
+                f"  Calls: {dict(self.strategy_call_counts)}",
+                "  Mean latency by strategy: {"
+                + ", ".join(f"{k}: {self.strategy_latency_mean(k):.2f}s" for k in self.strategy_call_counts)
+                + "}}",
+                "",
+                "⏱️  Timing Breakdown:",
+                f"  Evaluation: {self.time_eval_total:.1f}s",
+                f"  Mutation: {self.time_mutation_total:.1f}s",
+                f"  Scheduler: {self.time_scheduler_total:.1f}s",
+                f"  Archive: {self.time_archive_total:.1f}s",
+                "",
+                "🎯 Operator Performance:",
+            ]
+        )
 
         for operator in sorted(self.operator_delta_quality.keys()):
             success_rate = self.operator_success_rate(operator)
@@ -497,43 +491,49 @@ class Metrics:
             count = len(self.operator_delta_quality[operator])
             lines.append(f"  {operator}: {success_rate:.1%} success, {mean_improvement:+.3f} mean Δ ({count} samples)")
 
-        lines.extend([
-            "",
-            "🚫 Early Stopping:",
-            f"  Parent target: {self.early_stops_parent_target}",
-            f"  Stragglers: {self.early_stops_stragglers}",
-            f"  Target quality (all rungs): {self.early_stops_target_quality}",
-            f"  Target quality (final rung): {self.final_rung_early_stops_target_quality}",
-            f"  Total candidates early-stopped: {self.candidates_early_stopped}",
-            "",
-            "📦 Archive:",
-            f"  Max Pareto size: {self.pareto_size_max}",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "🚫 Early Stopping:",
+                f"  Parent target: {self.early_stops_parent_target}",
+                f"  Stragglers: {self.early_stops_stragglers}",
+                f"  Target quality (all rungs): {self.early_stops_target_quality}",
+                f"  Target quality (final rung): {self.final_rung_early_stops_target_quality}",
+                f"  Total candidates early-stopped: {self.candidates_early_stopped}",
+                "",
+                "📦 Archive:",
+                f"  Max Pareto size: {self.pareto_size_max}",
+                "",
+            ]
+        )
 
         if self.target_quality is not None:
             target_shard = self.target_shard_fraction if self.target_shard_fraction is not None else 1.0
             baseline_str = f"{self.baseline_quality:.3f}" if self.baseline_recorded else "n/a"
             if self.time_to_target_seconds is None:
-                lines.extend([
-                    "🚀 Turbo Metric:",
-                    f"  Target shard: {target_shard:.2f}",
-                    f"  Baseline={baseline_str} → Target={self.target_quality:.3f}",
-                    "  Time to target: not reached",
-                    "  Turbo score: n/a",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "🚀 Turbo Metric:",
+                        f"  Target shard: {target_shard:.2f}",
+                        f"  Baseline={baseline_str} → Target={self.target_quality:.3f}",
+                        "  Time to target: not reached",
+                        "  Turbo score: n/a",
+                        "",
+                    ]
+                )
             else:
                 score = self.turbo_score()
                 score_str = f"{score:.4f}" if score is not None else "n/a"
-                lines.extend([
-                    "🚀 Turbo Metric:",
-                    f"  Target shard: {target_shard:.2f}",
-                    f"  Baseline={baseline_str} → Target={self.target_quality:.3f}",
-                    f"  Time to target: {self.time_to_target_seconds:.1f}s",
-                    f"  Turbo score: {score_str}",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "🚀 Turbo Metric:",
+                        f"  Target shard: {target_shard:.2f}",
+                        f"  Baseline={baseline_str} → Target={self.target_quality:.3f}",
+                        f"  Time to target: {self.time_to_target_seconds:.1f}s",
+                        f"  Turbo score: {score_str}",
+                        "",
+                    ]
+                )
 
         if self.time_to_target_seconds is None and self.time_to_best_rung is not None:
             rung = self.highest_rung_fraction
@@ -542,19 +542,23 @@ class Metrics:
             if baseline_rung is not None and self.time_to_best_rung > 0:
                 gain = self.best_rung_quality - baseline_rung
                 rung_score = gain / self.time_to_best_rung if gain > 0 else 0.0
-            lines.extend([
-                "🚀 Rung Metric:",
-                f"  Rung={rung:.2f} quality={self.best_rung_quality:.3f}",
-                f"  Time to rung: {self.time_to_best_rung:.1f}s",
-                f"  Rung score: {rung_score:.4f}" if rung_score is not None else "  Rung score: n/a",
-                "",
-            ])
+            lines.extend(
+                [
+                    "🚀 Rung Metric:",
+                    f"  Rung={rung:.2f} quality={self.best_rung_quality:.3f}",
+                    f"  Time to rung: {self.time_to_best_rung:.1f}s",
+                    f"  Rung score: {rung_score:.4f}" if rung_score is not None else "  Rung score: n/a",
+                    "",
+                ]
+            )
 
-        lines.extend([
-            "Best observed:",
-            f"  Quality={self.best_quality:.3f} @ shard {self.best_shard_fraction:.2f}",
-            "",
-        ])
+        lines.extend(
+            [
+                "Best observed:",
+                f"  Quality={self.best_quality:.3f} @ shard {self.best_shard_fraction:.2f}",
+                "",
+            ]
+        )
 
         lines.append("=" * 80)
 

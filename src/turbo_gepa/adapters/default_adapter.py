@@ -35,7 +35,7 @@ from turbo_gepa.config import (
     adaptive_config,
     recommended_executor_workers,
 )
-from turbo_gepa.evaluator import AsyncEvaluator
+from turbo_gepa.evaluator import AsyncEvaluator, JudgeFn
 from turbo_gepa.interfaces import Candidate, EvalResult
 from turbo_gepa.islands import IslandContext, spawn_islands
 from turbo_gepa.logging import ProgressReporter
@@ -62,6 +62,7 @@ def _detect_fd_guard() -> int | None:
         return max(32, int(soft * 0.5))
     except Exception:  # pragma: no cover - platform specific
         return None
+
 
 _AIME_HASHTAG_RE = re.compile(r"###\s*([\-+]?\d+)", re.IGNORECASE)
 _BOXED_RE = re.compile(r"\\boxed\{([^}]+)\}")
@@ -228,6 +229,14 @@ class DefaultAdapter:
         auto_config: bool = True,
         scoring_fn: ScoringFn | None = None,
         eval_fn: EvalFn | None = None,
+        # Judge options (opt-in LLM-as-judge for rich feedback)
+        judge_fn: JudgeFn | None = None,
+        judge_model: str | None = None,  # If set, creates default LLM judge
+        judge_prompt_template: str | None = None,  # Custom judge prompt
+        judge_sample_rate: float = 1.0,  # 0-1, fraction of traces to judge
+        judge_on_fail_only: bool = False,  # Only judge failures
+        judge_concurrency: int = 8,
+        judge_fail_threshold: float = 0.5,  # Quality below this = failure
     ) -> None:
         if not dataset:
             raise ValueError("dataset must contain at least one data instance")
@@ -264,11 +273,7 @@ class DefaultAdapter:
         self.base_log_dir = os.path.abspath(base_logs)
         Path(self.base_cache_dir).mkdir(parents=True, exist_ok=True)
         Path(self.base_log_dir).mkdir(parents=True, exist_ok=True)
-        control_path = (
-            config.control_dir
-            if config.control_dir is not None
-            else env_control
-        )
+        control_path = config.control_dir if config.control_dir is not None else env_control
         self.control_dir = os.path.abspath(control_path) if control_path else None
         if self.control_dir:
             Path(self.control_dir).mkdir(parents=True, exist_ok=True)
@@ -289,6 +294,7 @@ class DefaultAdapter:
         self.logger = StdOutLogger(min_level=min_level)
         self._debug_enabled = min_level <= LogLevel.DEBUG
         import asyncio as _asyncio_adapter
+
         base_limit = int(self.config.llm_connection_limit or self.config.eval_concurrency)
         if self._fd_guard_limit is not None:
             base_limit = min(base_limit, max(4, self._fd_guard_limit // 2))
@@ -337,6 +343,18 @@ class DefaultAdapter:
 
         # Custom evaluation function for non-numeric tasks
         self._eval_fn = eval_fn
+
+        # Judge configuration (opt-in LLM-as-judge for rich diagnostic feedback)
+        self._judge_fn = judge_fn
+        self._judge_model = judge_model
+        self._judge_prompt_template = judge_prompt_template
+        self._judge_sample_rate = judge_sample_rate
+        self._judge_on_fail_only = judge_on_fail_only
+        self._judge_concurrency = judge_concurrency
+        self._judge_fail_threshold = judge_fail_threshold
+
+        # If judge_model is provided but judge_fn is not, we'll create a default judge later
+        # (deferred to avoid import at module load time)
 
         # Configure reflection/spec strategies
         self._reflection_strategies: tuple[ReflectionStrategy, ...] = tuple(self.config.reflection_strategies or ())
@@ -474,6 +492,30 @@ class DefaultAdapter:
 
         return mapper
 
+    def _get_judge_fn(self) -> JudgeFn | None:
+        """Get the judge function, creating one from judge_model if needed."""
+        if self._judge_fn is not None:
+            return self._judge_fn
+
+        if self._judge_model is None:
+            return None
+
+        # Lazy import to avoid dependency at module load time
+        try:
+            from turbo_gepa.evaluators.llm_judge import LLMJudgeConfig, LLMJudgeEvaluator
+        except ImportError:
+            self.logger.log(
+                "⚠️ judge_model specified but turbo_gepa.evaluators.llm_judge not available",
+                LogLevel.WARNING,
+            )
+            return None
+
+        config = LLMJudgeConfig(
+            model=self._judge_model,
+            prompt_template=self._judge_prompt_template,
+        )
+        evaluator = LLMJudgeEvaluator(config)
+        return evaluator.evaluate
 
     def _create_strategy_runner(
         self,
@@ -535,10 +577,10 @@ class DefaultAdapter:
 
                     from litellm import acompletion
 
-                    async def invoke_reflection():
+                    async def invoke_reflection(_kwargs=completion_kwargs):
                         return await self._acompletion_with_client(
                             acompletion,
-                            completion_kwargs,
+                            _kwargs,
                             180.0,
                             semaphore=self._reflection_llm_semaphore,
                         )
@@ -556,10 +598,10 @@ class DefaultAdapter:
                                 f"{self.reflection_model.name} rejected temperature parameter"
                             )
 
-                            async def invoke_no_temp():
+                            async def invoke_no_temp(_kwargs=completion_kwargs):
                                 return await self._acompletion_with_client(
                                     acompletion,
-                                    completion_kwargs,
+                                    _kwargs,
                                     180.0,
                                     semaphore=self._reflection_llm_semaphore,
                                 )
@@ -618,20 +660,14 @@ class DefaultAdapter:
             if not cleaned:
                 continue
             if len(cleaned) < 50:
-                self._log_debug(
-                    f"   ⚠️ Skipping {strategy_name} mutation {idx}: Too short ({len(cleaned)} chars)"
-                )
+                self._log_debug(f"   ⚠️ Skipping {strategy_name} mutation {idx}: Too short ({len(cleaned)} chars)")
                 continue
             if cleaned.startswith("###"):
-                self._log_debug(
-                    f"   ⚠️ Skipping {strategy_name} mutation {idx}: Looks like an answer, not a prompt"
-                )
+                self._log_debug(f"   ⚠️ Skipping {strategy_name} mutation {idx}: Looks like an answer, not a prompt")
                 continue
             stripped = cleaned.replace("#", "").replace(" ", "")
             if len(cleaned) < 100 and stripped.isdigit():
-                self._log_debug(
-                    f"   ⚠️ Skipping {strategy_name} mutation {idx}: Appears to be numeric output"
-                )
+                self._log_debug(f"   ⚠️ Skipping {strategy_name} mutation {idx}: Appears to be numeric output")
                 continue
             cleaned_mutations.append(cleaned)
 
@@ -775,9 +811,7 @@ class DefaultAdapter:
             snapshots.append(orchestrator.evolution_snapshot(include_edges=True))
         return self._combine_evolution_snapshots(snapshots)
 
-    async def _summarize_island_runs(
-        self, orchestrators: Sequence[Orchestrator | None]
-    ) -> dict[str, Any]:
+    async def _summarize_island_runs(self, orchestrators: Sequence[Orchestrator | None]) -> dict[str, Any]:
         combined_archive = self._make_archive()
         inserts: list[tuple[Candidate, EvalResult]] = []
         for orchestrator in orchestrators:
@@ -796,9 +830,7 @@ class DefaultAdapter:
             for orchestrator in orchestrators
             if orchestrator is not None
         ]
-        metrics_per_island = [
-            meta.get("metrics") if isinstance(meta, dict) else None for meta in island_metadata
-        ]
+        metrics_per_island = [meta.get("metrics") if isinstance(meta, dict) else None for meta in island_metadata]
         best_meta: dict[str, Any] | None = None
         best_quality = float("-inf")
         for meta in island_metadata:
@@ -867,7 +899,11 @@ class DefaultAdapter:
             star_prompt = getattr(orchestrator, "_north_star_prompt", None)
             star_quality = getattr(orchestrator, "_north_star_quality", None)
             star_shard = getattr(orchestrator, "_north_star_shard", None)
-            if isinstance(star_prompt, str) and isinstance(star_quality, (int, float)) and isinstance(star_shard, (int, float)):
+            if (
+                isinstance(star_prompt, str)
+                and isinstance(star_quality, (int, float))
+                and isinstance(star_shard, (int, float))
+            ):
                 best_prompt = star_prompt
                 best_quality = float(star_quality)
                 best_shard = float(star_shard)
@@ -1046,8 +1082,7 @@ class DefaultAdapter:
                 delay = min(3.0, delay)
                 delay += random.uniform(0.0, 0.3)
                 self.logger.log(
-                    f"⚠️  LLM call '{label}' failed (attempt {attempt}/{max_attempts}): {exc}. "
-                    f"Retrying in {delay:.1f}s",
+                    f"⚠️  LLM call '{label}' failed (attempt {attempt}/{max_attempts}): {exc}. Retrying in {delay:.1f}s",
                     LogLevel.WARNING,
                 )
                 await asyncio.sleep(delay)
@@ -1243,6 +1278,9 @@ class DefaultAdapter:
         if display_progress and progress_callback is None:
             progress_callback = ProgressReporter(self.logger)
 
+        # Resolve judge function (either user-provided or created from judge_model)
+        judge_fn = self._get_judge_fn()
+
         evaluator = AsyncEvaluator(
             cache=cache or self.cache,
             task_runner=self._task_runner,
@@ -1256,6 +1294,12 @@ class DefaultAdapter:
             replay_stragglers=self.config.replay_stragglers,
             min_samples_for_confidence=self.config.min_samples_for_confidence,
             target_quality=self.config.target_quality,
+            # Judge options
+            judge_fn=judge_fn,
+            judge_sample_rate=self._judge_sample_rate,
+            judge_on_fail_only=self._judge_on_fail_only,
+            judge_concurrency=self._judge_concurrency,
+            judge_fail_threshold=self._judge_fail_threshold,
         )
 
         base_run_id = getattr(self, "_current_run_token", None) or uuid.uuid4().hex[:8]
@@ -1636,8 +1680,7 @@ class DefaultAdapter:
             )
             mutator._metrics = orchestrator.metrics
             island_seeds = [
-                Candidate(text=seed.text, meta=dict(seed.meta, island=island_id))
-                for seed in normalized_seeds
+                Candidate(text=seed.text, meta=dict(seed.meta, island=island_id)) for seed in normalized_seeds
             ]
             try:
                 await orchestrator.run(

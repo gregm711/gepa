@@ -71,4 +71,3 @@ def run_local_multiworker(
 
     for proc in processes:
         proc.join()
-

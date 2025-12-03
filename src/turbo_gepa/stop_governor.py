@@ -30,6 +30,7 @@ class EpochMetrics:
     tokens_spent_this_epoch: int = 0
     monetary_cost_spent_this_epoch: float = 0.0
 
+
 @dataclass
 class StopGovernorConfig:
     """Configuration for automatic stopping."""
@@ -70,6 +71,7 @@ class StopGovernorConfig:
     # NEW: Max monetary cost to spend without improvement (hard cap)
     max_monetary_cost_no_improvement: float | None = None
 
+
 class StopGovernor:
     """
     Monitors optimization progress and decides when to stop.
@@ -94,7 +96,7 @@ class StopGovernor:
         # Hysteresis counter
         self.epochs_below_threshold: int = 0
         self.epochs_no_improvement: int = 0
-        self.tokens_spent_since_last_improvement: int = 0 # NEW: Tracks tokens since last improvement
+        self.tokens_spent_since_last_improvement: int = 0  # NEW: Tracks tokens since last improvement
         self._monetary_cost_spent_since_last_improvement: float = 0.0  # NEW: Tracks cost since last improvement
         # Last best values
         self.last_best_quality: float = 0.0
@@ -277,9 +279,13 @@ class StopGovernor:
         if should_stop:
             if cost_hard_stop:
                 if money_cost_stop:
-                    debug_info["reason"] = f"cost_patience_exhausted_(${self._monetary_cost_spent_since_last_improvement:.2f})"
+                    debug_info["reason"] = (
+                        f"cost_patience_exhausted_(${self._monetary_cost_spent_since_last_improvement:.2f})"
+                    )
                 else:
-                    debug_info["reason"] = f"cost_patience_exhausted_({self.tokens_spent_since_last_improvement}_tokens)"
+                    debug_info["reason"] = (
+                        f"cost_patience_exhausted_({self.tokens_spent_since_last_improvement}_tokens)"
+                    )
             elif hard_stop:
                 debug_info["reason"] = f"no_improvement_for_{self.epochs_no_improvement}_epochs"
             else:

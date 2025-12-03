@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 Validator = Callable[[Candidate], None]
 MetricsMapper = Callable[[dict[str, float]], dict[str, float]]
 TaskRunner = Callable[[Candidate, str], Awaitable[dict[str, float]]]
+# Judge function: (output, expected, example, candidate) -> diagnostic dict or None
+JudgeFn = Callable[[str, str | None, dict[str, Any], Candidate], Awaitable[dict[str, Any] | None]]
 
 
 class AsyncEvaluator:
@@ -45,6 +47,12 @@ class AsyncEvaluator:
         min_samples_for_confidence: int = 20,
         target_quality: float | None = None,
         confidence_z: float | None = None,
+        # Judge options (opt-in, runs in batch after shard completion)
+        judge_fn: JudgeFn | None = None,
+        judge_sample_rate: float = 1.0,
+        judge_on_fail_only: bool = False,
+        judge_concurrency: int = 8,
+        judge_fail_threshold: float = 0.5,
     ) -> None:
         self.cache = cache
         self.task_runner = task_runner
@@ -71,6 +79,12 @@ class AsyncEvaluator:
         # final-rung early success. When zero or None we fall back to using the
         # plain running mean as before.
         self.confidence_z: float = float(confidence_z) if confidence_z is not None else 0.0
+        # Judge options: runs in batch after shard completion, attaches diagnostics to traces
+        self.judge_fn = judge_fn
+        self.judge_sample_rate = max(0.0, min(1.0, float(judge_sample_rate)))
+        self.judge_on_fail_only = bool(judge_on_fail_only)
+        self.judge_concurrency = max(1, int(judge_concurrency))
+        self.judge_fail_threshold = float(judge_fail_threshold)
 
     async def eval_on_shard(
         self,
@@ -134,7 +148,7 @@ class AsyncEvaluator:
                     if shard_fraction <= 0:
                         alpha = 0.0
                     else:
-                        alpha = shard_fraction ** 0.3
+                        alpha = shard_fraction**0.3
                 except Exception:
                     alpha = 0.0
             alpha = max(0.0, min(1.0, float(alpha)))
@@ -233,7 +247,14 @@ class AsyncEvaluator:
         async def _register_result(result: EvalResult, quality_override: float | None = None) -> None:
             # Update outer-scope accumulators for partial publishing and gating.
             # We mutate these counters here, so declare them nonlocal.
-            nonlocal completed, running_quality, running_sq, early_stop_flag, partial_n, last_partial_publish, early_stop_reason
+            nonlocal \
+                completed, \
+                running_quality, \
+                running_sq, \
+                early_stop_flag, \
+                partial_n, \
+                last_partial_publish, \
+                early_stop_reason
             async with quality_lock:
                 results.append(result)
                 completed += result.n_examples
@@ -246,7 +267,9 @@ class AsyncEvaluator:
                     partial_example_ids.extend(list(result.example_ids))
                 q_val = quality_override
                 if q_val is None:
-                    obj_quality = result.objectives.get(self.promote_objective) if isinstance(result.objectives, dict) else None
+                    obj_quality = (
+                        result.objectives.get(self.promote_objective) if isinstance(result.objectives, dict) else None
+                    )
                     if isinstance(obj_quality, (int, float)):
                         q_val = float(obj_quality)
                 if isinstance(q_val, (int, float)):
@@ -254,11 +277,7 @@ class AsyncEvaluator:
                     n = max(1, result.n_examples)
                     running_quality += q_val_f * n
                     running_sq += (q_val_f * q_val_f) * n
-                if (
-                    not early_stop_flag
-                    and parent_target is not None
-                    and total > 0
-                ):
+                if not early_stop_flag and parent_target is not None and total > 0:
                     remaining = total - completed
                     if remaining < 0:
                         remaining = 0
@@ -315,7 +334,10 @@ class AsyncEvaluator:
                 # Partial publish
                 if on_partial is not None and total > 0:
                     now = time.time()
-                    if partial_n >= max(1, partial_min_samples) and (now - last_partial_publish) >= partial_interval_seconds:
+                    if (
+                        partial_n >= max(1, partial_min_samples)
+                        and (now - last_partial_publish) >= partial_interval_seconds
+                    ):
                         averaged = {k: v / max(partial_n, 1) for k, v in partial_sum.items()}
                         partial = EvalResult(
                             objectives=averaged,
@@ -431,7 +453,7 @@ class AsyncEvaluator:
                 if isinstance(raw_output, str):
                     out = raw_output
                     if len(out) > max_len:
-                        out = out[: max_len] + "…"
+                        out = out[:max_len] + "…"
                     trace["output"] = out
                 result = EvalResult(
                     objectives=mapped,
@@ -462,9 +484,9 @@ class AsyncEvaluator:
             except asyncio.TimeoutError:
                 self._inflight_examples = max(0, self._inflight_examples - 1)
                 timeout_msg = (
-                    f"⚠️  Evaluation timed out for example {example_id} "
-                    f"after {self.timeout_seconds:.1f}s" if self.timeout_seconds else
-                    f"⚠️  Evaluation timed out for example {example_id}"
+                    f"⚠️  Evaluation timed out for example {example_id} after {self.timeout_seconds:.1f}s"
+                    if self.timeout_seconds
+                    else f"⚠️  Evaluation timed out for example {example_id}"
                 )
                 if show_progress:
                     self.logger.log(timeout_msg)
@@ -543,11 +565,7 @@ class AsyncEvaluator:
                 mean_duration = statistics.fmean(eval_durations)
                 stdev = statistics.pstdev(eval_durations) if len(eval_durations) > 1 else 0.0
                 # Robust quantiles (fallback to mean when samples are too few)
-                perc70 = (
-                    statistics.quantiles(eval_durations, n=100)[69]
-                    if len(eval_durations) >= 5
-                    else mean_duration
-                )
+                perc70 = statistics.quantiles(eval_durations, n=100)[69] if len(eval_durations) >= 5 else mean_duration
                 perc80 = (
                     statistics.quantiles(eval_durations, n=100)[79]
                     if len(eval_durations) >= 7
@@ -557,7 +575,7 @@ class AsyncEvaluator:
                 # Smooth absolute cap derived from observed latencies (no hard-coded tiers)
                 # - Partial rungs: tolerate ~2.0x p80
                 # - Final rung: a bit more headroom (~2.5x p80)
-                dyn_cap = (perc80 * (2.5 if is_final_shard else 2.0))
+                dyn_cap = perc80 * (2.5 if is_final_shard else 2.0)
                 # Clamp to a reasonable range to avoid runaway caps on noisy small samples
                 dyn_cap = float(max(12.0, min(75.0, dyn_cap)))
 
@@ -662,6 +680,7 @@ class AsyncEvaluator:
         batch_duration = time.time() - batch_start_time
         if eval_durations:
             import statistics
+
             mean_dur = statistics.fmean(eval_durations)
             stdev_dur = statistics.pstdev(eval_durations) if len(eval_durations) > 1 else 0.0
             try:
@@ -674,7 +693,7 @@ class AsyncEvaluator:
             if show_progress:
                 self.logger.log(
                     f"⏱️  Batch complete: {len(results)}/{total} examples in {batch_duration:.1f}s "
-                    f"(mean={mean_dur:.1f}s, stdev={stdev_dur:.1f}s, throughput={len(results)/batch_duration:.1f} ex/s)"
+                    f"(mean={mean_dur:.1f}s, stdev={stdev_dur:.1f}s, throughput={len(results) / batch_duration:.1f} ex/s)"
                 )
 
         totals: dict[str, float] = {}
@@ -706,12 +725,19 @@ class AsyncEvaluator:
                 f"(completed {completed}/{total}), stragglers_detached={straggler_detached_total}, "
                 f"duration={batch_duration:.1f}s"
             )
+
+        # Batch judge: run after shard completion, attach diagnostics to traces
+        aggregated_diagnostic: dict[str, Any] | None = None
+        if self.judge_fn is not None and traces:
+            traces, aggregated_diagnostic = await self._run_batch_judge(candidate, traces, show_progress)
+
         return EvalResult(
             objectives=averaged,
             traces=traces,
             n_examples=n_examples,
             shard_fraction=shard_fraction,
             example_ids=example_trace_ids,
+            diagnostic=aggregated_diagnostic,
         )
 
     @property
@@ -773,9 +799,9 @@ class AsyncEvaluator:
 
         if wait_timeout == 0.0:
             done = {future for future in futures if future.done()}
-            pending = {future for future in futures if not future.done()}
+            _pending = {future for future in futures if not future.done()}
         else:
-            done, pending = await asyncio.wait(futures, timeout=wait_timeout)
+            done, _pending = await asyncio.wait(futures, timeout=wait_timeout)
 
         results: list[EvalResult] = []
         for future in done:
@@ -795,12 +821,147 @@ class AsyncEvaluator:
                 self._straggler_results.pop(key, None)
 
         if results:
-            self.logger.log(
-                f"📦 Collected {len(results)} completed stragglers for candidate {fingerprint[:12]}"
-            )
+            self.logger.log(f"📦 Collected {len(results)} completed stragglers for candidate {fingerprint[:12]}")
 
         # Pending futures remain registered for the next grace window
         return results
+
+    async def _run_batch_judge(
+        self,
+        candidate: Candidate,
+        traces: list[dict[str, Any]],
+        show_progress: bool = False,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """
+        Run LLM judge on traces in batch after shard completion.
+
+        Returns:
+            (updated_traces, aggregated_diagnostic)
+            - updated_traces: traces with diagnostic["diagnostic"] attached where judged
+            - aggregated_diagnostic: summary stats across all judged traces
+        """
+        import random
+        import time
+
+        if not self.judge_fn or not traces:
+            return traces, None
+
+        # Select traces to judge based on sampling and failure filter
+        candidates_for_judging: list[tuple[int, dict[str, Any]]] = []
+        for idx, trace in enumerate(traces):
+            # Skip traces that already have diagnostics (e.g., from cache)
+            if trace.get("diagnostic"):
+                continue
+
+            quality = trace.get(self.promote_objective, trace.get("quality", 0.0))
+            is_failure = isinstance(quality, (int, float)) and quality < self.judge_fail_threshold
+
+            # Apply filters
+            if self.judge_on_fail_only and not is_failure:
+                continue
+            if self.judge_sample_rate < 1.0 and random.random() > self.judge_sample_rate:
+                continue
+
+            candidates_for_judging.append((idx, trace))
+
+        if not candidates_for_judging:
+            if show_progress and self.judge_sample_rate > 0:
+                self.logger.log(
+                    f"[i] Judge enabled but 0/{len(traces)} traces selected "
+                    f"(sample_rate={self.judge_sample_rate:.0%}, on_fail_only={self.judge_on_fail_only})"
+                )
+            return traces, None
+
+        if show_progress:
+            self.logger.log(
+                f"🔍 Running judge on {len(candidates_for_judging)}/{len(traces)} traces "
+                f"(sample_rate={self.judge_sample_rate:.0%}, on_fail_only={self.judge_on_fail_only})"
+            )
+
+        judge_start = time.time()
+        semaphore = asyncio.Semaphore(self.judge_concurrency)
+
+        async def judge_one(idx: int, trace: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
+            """Run judge on a single trace, return (index, diagnostic or None)."""
+            async with semaphore:
+                try:
+                    output = trace.get("output") or trace.get("response") or ""
+                    expected = trace.get("expected_answer")
+                    # Build example dict from trace
+                    example = {
+                        "input": trace.get("input", ""),
+                        "expected_answer": expected,
+                        "example_id": trace.get("example_id"),
+                    }
+                    # Add any additional context
+                    if trace.get("additional_context"):
+                        example["additional_context"] = trace["additional_context"]
+
+                    diagnostic = await self.judge_fn(output, expected, example, candidate)
+                    return idx, diagnostic
+                except Exception as e:
+                    self.logger.log(
+                        f"⚠️ Judge failed for trace {trace.get('example_id', idx)}: {e}",
+                        LogLevel.WARNING,
+                    )
+                    return idx, None
+
+        # Run all judge calls concurrently
+        tasks = [judge_one(idx, trace) for idx, trace in candidates_for_judging]
+        results = await asyncio.gather(*tasks)
+
+        # Attach diagnostics to traces and persist to cache
+        judged_count = 0
+        failure_stages: dict[str, int] = {}
+        all_suggestions: list[str] = []
+        cache_updates: list[tuple[str, dict[str, Any]]] = []
+
+        for idx, diagnostic in results:
+            if diagnostic is None:
+                continue
+            judged_count += 1
+            traces[idx]["diagnostic"] = diagnostic
+
+            # Track for cache update
+            example_id = traces[idx].get("example_id")
+            if example_id:
+                cache_updates.append((example_id, diagnostic))
+
+            # Aggregate failure stages
+            stage = diagnostic.get("failure_stage")
+            if stage and stage != "none":
+                failure_stages[stage] = failure_stages.get(stage, 0) + 1
+
+            # Collect suggestions
+            suggestions = diagnostic.get("suggestions")
+            if isinstance(suggestions, list):
+                all_suggestions.extend(suggestions)
+
+        # Persist diagnostics to cache so future cache hits include them
+        if cache_updates and hasattr(self.cache, "update_trace_diagnostic"):
+            update_tasks = [self.cache.update_trace_diagnostic(candidate, ex_id, diag) for ex_id, diag in cache_updates]
+            await asyncio.gather(*update_tasks, return_exceptions=True)
+
+        judge_duration = time.time() - judge_start
+
+        if show_progress and judged_count > 0:
+            self.logger.log(f"✅ Judge completed: {judged_count} diagnostics in {judge_duration:.1f}s")
+
+        # Build aggregated diagnostic
+        aggregated: dict[str, Any] | None = None
+        if judged_count > 0:
+            aggregated = {
+                "judged_count": judged_count,
+                "total_traces": len(traces),
+                "failure_stages": failure_stages,
+                "suggestions": all_suggestions[:20],  # Cap to avoid bloat
+            }
+            # Add most common failure stage
+            if failure_stages:
+                most_common = max(failure_stages, key=failure_stages.get)  # type: ignore
+                aggregated["primary_failure_stage"] = most_common
+
+        return traces, aggregated
 
     def discard_straggler_results(self, candidate: Candidate, example_ids: Sequence[str]) -> None:
         """Forget pending straggler futures for the given candidate/example IDs."""

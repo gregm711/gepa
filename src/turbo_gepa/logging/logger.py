@@ -10,6 +10,7 @@ from typing import Protocol
 
 class LogLevel(IntEnum):
     """Log levels for filtering messages."""
+
     DEBUG = 10
     INFO = 20
     WARNING = 30

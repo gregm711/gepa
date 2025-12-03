@@ -430,8 +430,8 @@ class DSpyAdapter:
             prompt = InstructionProposalPrompt.build_prompt(current_inst, dataset)
 
             # Call reflection LLM with retries
-            async def invoke():
-                return await self.reflection_lm(prompt)
+            async def invoke(_prompt=prompt):
+                return await self.reflection_lm(_prompt)
 
             response = await self._call_with_retries(
                 invoke,
@@ -560,6 +560,7 @@ class DSpyAdapter:
         # Use ProgressReporter if no callback provided but logging is enabled
         if metrics_callback is None:
             from turbo_gepa.logging import LogLevel, ProgressReporter, StdOutLogger
+
             # Create a basic logger if we don't have access to one (DSpyAdapter doesn't seem to hold one)
             # But we can create a temporary one or just skip default reporting if preferred.
             # For consistency with DefaultAdapter, let's try to provide basic stdout reporting.
@@ -653,7 +654,7 @@ class DSpyAdapter:
             "qd_elites": [],  # Deprecated
             "archive": orchestrator.archive,
             "orchestrator": orchestrator,
-            "metrics": orchestrator.metrics_snapshot(), # Add metrics snapshot to return value
+            "metrics": orchestrator.metrics_snapshot(),  # Add metrics snapshot to return value
         }
 
     def optimize(

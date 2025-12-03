@@ -56,7 +56,7 @@ def _default_variance_tolerance(shards: Sequence[float]) -> dict[float, float]:
         # Statistical tolerance: 1.5 * stderr for binary outcomes
         # stderr = 0.5/sqrt(n), where n = shard * dataset_size
         # For unit dataset: 0.75/sqrt(shard)
-        statistical_tolerance = 0.75 / (shard ** 0.5)
+        statistical_tolerance = 0.75 / (shard**0.5)
 
         # Add base tolerance to prevent overfitting at final rung
         base_tolerance = 0.02
@@ -102,7 +102,7 @@ def _default_shrinkage_alpha(shards: Sequence[float]) -> dict[float, float]:
             continue
         # Alpha increases with shard size (less shrinkage at larger rungs)
         # Use power of 0.3 for smooth interpolation
-        alpha = shard ** 0.3
+        alpha = shard**0.3
         alpha_map[shard] = round(alpha, 3)
 
     return alpha_map
@@ -272,7 +272,7 @@ class Config:
     control_dir: str | None = None
     batch_size: int | None = None  # Auto-scaled to eval_concurrency if None
     queue_limit: int | None = None  # Auto-scaled to 2x eval_concurrency if None
-    scoring_fn: ScoringFn = maximize_metric("quality")
+    scoring_fn: ScoringFn = field(default_factory=lambda: maximize_metric("quality"))
     promote_objective: str = SCORE_KEY
     max_mutations_per_round: int | None = None  # Auto-scaled to eval_concurrency if None
     mutation_buffer_limit: int | None = None  # Max pending streamed mutations awaiting queue capacity
@@ -282,7 +282,9 @@ class Config:
     target_shard_fraction: float | None = 1.0  # Rung fraction that counts as "full" for turbo metric
     eval_timeout_seconds: float | None = 120.0  # Max time to wait for a single LLM evaluation
     max_optimization_time_seconds: float | None = None  # Global timeout - stop optimization after this many seconds
-    max_total_cost_dollars: float | None = None  # Global budget cap - stop optimization if total cost exceeds this amount (USD)
+    max_total_cost_dollars: float | None = (
+        None  # Global budget cap - stop optimization if total cost exceeds this amount (USD)
+    )
     reflection_strategy_names: tuple[str, ...] | None = None  # Default to all known strategies
     reflection_strategies: tuple[ReflectionStrategy, ...] | None = None
     max_final_shard_inflight: int | None = None  # If None, derive cap from eval_concurrency
@@ -327,7 +329,6 @@ class Config:
     #   - CRITICAL: Only critical failures
     log_level: str = "WARNING"  # Minimum log level (default: WARNING for clean dashboard output)
     enable_debug_log: bool = False  # Write verbose orchestrator debug file when True
-
 
     def __post_init__(self):
         """Auto-scale parameters based on eval_concurrency if not explicitly set."""
@@ -442,8 +443,8 @@ class Config:
         # Derive a global z-score (confidence margin) from the same dial.
         # At the slow/accuracy end we want a conservative margin (~95% CI),
         # while at the fast end we accept much tighter bounds.
-        z_slow = 2.0   # ~95% confidence
-        z_fast = 0.3   # very permissive, speed-biased
+        z_slow = 2.0  # ~95% confidence
+        z_fast = 0.3  # very permissive, speed-biased
         z = z_slow - (z_slow - z_fast) * fast
         self.confidence_z = float(max(0.0, z))
 

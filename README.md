@@ -190,6 +190,70 @@ TurboGEPA ships with multiple reflection styles that can be combined or selected
 Blend them by listing multiple names; the mutator automatically re-weights strategies based on which ones are delivering better quality during the run.
 All built-in strategy definitions (and reference system prompts) live in `src/turbo_gepa/strategies/__init__.py` so you can inspect or extend them easily.
 
+#### Optional: LLM-as-Judge Feedback
+
+TurboGEPA supports an opt-in **LLM judge** that provides rich diagnostic feedback to guide reflection strategies. This is inspired by Prompt Learning research showing that detailed failure analysis can improve prompt evolution quality.
+
+**Key features:**
+- **Backward compatible**: Disabled by default, no changes to existing behavior
+- **Cost-controlled**: Configurable sample rate and fail-only judging
+- **Never affects promotion**: Judge diagnostics are for reflection only; the scheduler uses task_runner quality
+- **Batch execution**: Judge runs after shard completion, not per-example
+
+**Basic usage with built-in judge:**
+
+```python
+from turbo_gepa.adapters import DefaultAdapter
+
+adapter = DefaultAdapter(
+    dataset=trainset,
+    task_lm="openrouter/openai/gpt-oss-120b:nitro",
+    reflection_lm="openrouter/x-ai/grok-4-fast",
+    # Enable LLM judge
+    judge_model="openrouter/openai/gpt-4o-mini",  # Cheap, fast model for judging
+    judge_task_type="qa",  # "qa", "rag", "coding", or "generic"
+    judge_sample_rate=0.2,  # Only judge 20% of traces (cost control)
+    judge_on_fail_only=True,  # Only judge failures (quality < threshold)
+)
+
+# Enable the evaluator_feedback_reflection strategy to use judge diagnostics
+adapter.config.reflection_strategy_names = (
+    "incremental_reflection",
+    "spec_induction",
+    "evaluator_feedback_reflection",  # Uses judge diagnostics
+)
+```
+
+**Custom judge function:**
+
+```python
+async def my_judge(output: str, expected: str | None, example: dict, candidate) -> dict | None:
+    """Custom judge that returns structured diagnostics."""
+    # Your evaluation logic here
+    return {
+        "quality": 0.7,
+        "failure_stage": "reasoning",  # "understanding", "reasoning", "output_formatting", "none"
+        "failure_explanation": "Model skipped step 3 of the calculation",
+        "suggestions": ["Add explicit step-by-step breakdown", "Include intermediate results"],
+    }
+
+adapter = DefaultAdapter(
+    dataset=trainset,
+    task_lm=task_lm,
+    reflection_lm=reflection_lm,
+    judge_fn=my_judge,  # Custom judge function
+    judge_sample_rate=0.5,
+)
+```
+
+**Built-in templates** (`judge_task_type`):
+- `"qa"`: Question-answering tasks (understanding, reasoning, formatting failures)
+- `"rag"`: Multi-hop retrieval (input_parsing, retrieval, reasoning, synthesis failures)
+- `"coding"`: Code generation (understanding, approach, implementation, edge_cases failures)
+- `"generic"`: General tasks (understanding, reasoning, execution, formatting failures)
+
+**The `evaluator_feedback_reflection` strategy** aggregates judge diagnostics from parent contexts to generate targeted mutations that address specific failure modes. It's opt-in and should be explicitly added to `reflection_strategy_names`.
+
 Example:
 
 ```python

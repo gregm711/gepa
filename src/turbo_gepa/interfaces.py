@@ -77,6 +77,12 @@ class EvalResult:
     Captures evaluation metrics, traces, and coverage for a candidate.
 
     All objectives are maximized; callers can negate costs upstream.
+
+    Diagnostics:
+        Optional rich feedback from an LLM judge, stored per-trace as
+        ``trace["diagnostic"]`` and/or aggregated here. Used by reflection
+        strategies (e.g., evaluator_feedback_reflection) but never affects
+        the promotion scalar used by the scheduler.
     """
 
     objectives: dict[str, float]
@@ -86,6 +92,8 @@ class EvalResult:
     example_ids: Sequence[str] | None = None
     # Optional: fraction of examples completed on this shard (for live partials)
     coverage_fraction: float | None = None
+    # Optional: aggregated diagnostic feedback from LLM judge (for reflection)
+    diagnostic: dict[str, Any] | None = None
 
     def objective(self, key: str, default: float | None = None) -> float | None:
         """Convenience accessor for a specific objective value."""
@@ -109,13 +117,38 @@ class EvalResult:
             example_ids.extend(other.example_ids)
         total_examples = self.n_examples + other.n_examples
         averaged = {k: v / max(total_examples, 1) for k, v in combined.items()}
+
+        # Merge coverage_fraction as weighted average
+        merged_coverage: float | None = None
+        if self.coverage_fraction is not None or other.coverage_fraction is not None:
+            self_cov = self.coverage_fraction if self.coverage_fraction is not None else 1.0
+            other_cov = other.coverage_fraction if other.coverage_fraction is not None else 1.0
+            if total_examples > 0:
+                merged_coverage = (self_cov * self.n_examples + other_cov * other.n_examples) / total_examples
+            else:
+                merged_coverage = (self_cov + other_cov) / 2.0
+
+        # Merge diagnostics: combine if both present, otherwise take whichever exists
+        merged_diagnostic: dict[str, Any] | None = None
+        if self.diagnostic or other.diagnostic:
+            merged_diagnostic = {}
+            if self.diagnostic:
+                merged_diagnostic.update(self.diagnostic)
+            if other.diagnostic:
+                # For lists (e.g., suggestions), concatenate; for scalars, prefer other's
+                for k, v in other.diagnostic.items():
+                    if k in merged_diagnostic and isinstance(merged_diagnostic[k], list) and isinstance(v, list):
+                        merged_diagnostic[k] = merged_diagnostic[k] + v
+                    else:
+                        merged_diagnostic[k] = v
         return EvalResult(
             objectives=averaged,
             traces=traces,
             n_examples=total_examples,
             shard_fraction=self.shard_fraction,
             example_ids=example_ids,
-            coverage_fraction=self.coverage_fraction,
+            coverage_fraction=merged_coverage,
+            diagnostic=merged_diagnostic,
         )
 
 

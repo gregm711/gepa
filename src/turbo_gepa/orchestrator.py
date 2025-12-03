@@ -225,11 +225,15 @@ class Orchestrator:
         self._mutation_kp: float = 0.2  # Proportional gain for mutation pacing
         self._priority_counter: int = 0  # Tie-breaker for heap ordering
         self._priority_queue: list = []  # Heap: (-priority, -rung_idx, counter, candidate)
-        self._mutation_buffer_limit: int = max(1, int(self.config.mutation_buffer_limit or (self.config.eval_concurrency * 4)))
+        self._mutation_buffer_limit: int = max(
+            1, int(self.config.mutation_buffer_limit or (self.config.eval_concurrency * 4))
+        )
         self._mutation_buffer: deque[Candidate] = deque()
         self._buffered_fingerprints: set[str] = set()
         queue_maxsize = int(self.config.replay_worker_queue_size or 0)
-        self._replay_queue: asyncio.Queue[ReplayJob | None] = asyncio.Queue(maxsize=queue_maxsize if queue_maxsize > 0 else 0)
+        self._replay_queue: asyncio.Queue[ReplayJob | None] = asyncio.Queue(
+            maxsize=queue_maxsize if queue_maxsize > 0 else 0
+        )
         self._replay_workers: list[asyncio.Task] = []
         self._replay_worker_cap: int = max(0, int(self.config.replay_workers or 0))
         self._replay_worker_cooldown: float = 0.0
@@ -286,6 +290,7 @@ class Orchestrator:
 
         # Telemetry
         from turbo_gepa.telemetry import TelemetryCollector
+
         self._telemetry = TelemetryCollector.initialize(self._run_id, self.island_id)
         self._telemetry_task: asyncio.Task | None = None
 
@@ -309,7 +314,7 @@ class Orchestrator:
                 # Approximate straggler count based on known pending vs running
                 # Ideally get precise count from evaluator if possible,
                 # or use _pending_fingerprints - _inflight_fingerprints logic
-                stragglers = 0 # Simple placeholder, refine if needed
+                stragglers = 0  # Simple placeholder, refine if needed
 
                 snap = self._telemetry.snapshot(
                     inflight=self._total_inflight,
@@ -318,7 +323,7 @@ class Orchestrator:
                     queue_mutation=queue_mutation,
                     queue_replay=queue_replay,
                     straggler_count=stragglers,
-                    cost=self.metrics.total_cost_usd
+                    cost=self.metrics.total_cost_usd,
                 )
                 self._telemetry.publish(snap)
             except Exception:
@@ -336,10 +341,7 @@ class Orchestrator:
             self.metrics.best_quality = quality
             self.metrics.best_shard_fraction = shard_fraction
         target_shard = self.metrics.target_shard_fraction or 1.0
-        if (
-            not self.metrics.baseline_recorded
-            and shard_fraction + 1e-6 >= target_shard
-        ):
+        if not self.metrics.baseline_recorded and shard_fraction + 1e-6 >= target_shard:
             self.metrics.baseline_quality = quality
             self.metrics.baseline_recorded = True
         elapsed = None
@@ -374,11 +376,7 @@ class Orchestrator:
         shard_fraction = shard_fraction if shard_fraction is not None else 0.0
         target_quality = self.config.target_quality
         target_shard_fraction = self.config.target_shard_fraction or self._runtime_shards[-1]
-        if (
-            target_quality is None
-            or self.metrics.time_to_target_seconds is not None
-            or elapsed is None
-        ):
+        if target_quality is None or self.metrics.time_to_target_seconds is not None or elapsed is None:
             return
         if shard_fraction + 1e-6 >= target_shard_fraction and quality >= target_quality:
             # Try to capture the best full-shard entry (candidate + prompt) at the moment of target attainment.
@@ -423,8 +421,12 @@ class Orchestrator:
                 target_shard_fraction=target_shard_fraction,
                 evaluations_to_target=self.evaluations_run,
                 promotions_by_rung=promos,
-                best_prompt_snippet=(self._north_star_prompt[:180] if isinstance(self._north_star_prompt, str) else None),
-                best_full_quality=(round(self._north_star_quality, 6) if isinstance(self._north_star_quality, (int, float)) else None),
+                best_prompt_snippet=(
+                    self._north_star_prompt[:180] if isinstance(self._north_star_prompt, str) else None
+                ),
+                best_full_quality=(
+                    round(self._north_star_quality, 6) if isinstance(self._north_star_quality, (int, float)) else None
+                ),
             )
             self._write_control_stop(elapsed)
             self._control_heartbeat(
@@ -481,11 +483,7 @@ class Orchestrator:
         if self._control_heartbeat_path is None:
             return
         now = time.time()
-        if (
-            not force
-            and status == "running"
-            and (now - self._control_last_heartbeat) < 2.0
-        ):
+        if not force and status == "running" and (now - self._control_last_heartbeat) < 2.0:
             return
         payload: dict[str, Any] = {
             "run_id": self._run_id,
@@ -572,8 +570,7 @@ class Orchestrator:
         if num_shards:
             final_fraction = self._runtime_shards[-1]
             self._cost_remaining = [
-                max(1e-6, final_fraction - (self._runtime_shards[i - 1] if i > 0 else 0.0))
-                for i in range(num_shards)
+                max(1e-6, final_fraction - (self._runtime_shards[i - 1] if i > 0 else 0.0)) for i in range(num_shards)
             ]
         else:
             self._cost_remaining = []
@@ -776,14 +773,14 @@ class Orchestrator:
             if isinstance(quality, (int, float)):
                 # Normalize quality to [0, 1] range (assuming quality is already in this range)
                 normalized_quality = max(0.0, min(1.0, float(quality)))
-                priority *= (1 + self._priority_beta * normalized_quality)
+                priority *= 1 + self._priority_beta * normalized_quality
 
         # Boost parents with strong recent improvements (moving average of delta quality)
         if isinstance(candidate.meta, dict):
             recent_avg = candidate.meta.get("recent_delta_avg")
             if isinstance(recent_avg, (int, float)) and recent_avg > 0:
                 boost = max(0.0, min(1.0, recent_avg))
-                priority *= (1 + self._recent_delta_weight * boost)
+                priority *= 1 + self._recent_delta_weight * boost
 
         # Bias toward higher rungs (closer to target shard) until
         # time_to_target is reached. This ensures that candidates on
@@ -803,7 +800,7 @@ class Orchestrator:
             max_dist = max(1, len(self._runtime_shards) - 1)
             # Map dist in [0, max_dist] to a multiplier in [1 + 0.3, 1.0]
             closeness = max(0.0, float(max_dist - dist)) / float(max_dist)
-            priority *= (1.0 + 0.3 * closeness)
+            priority *= 1.0 + 0.3 * closeness
 
         return priority
 
@@ -1047,9 +1044,7 @@ class Orchestrator:
                 )
         except Exception as exc:
             if self.show_progress:
-                self.logger.log(
-                    f"⚠️  Replay worker {worker_id} failed for {job.candidate.fingerprint[:12]}: {exc}"
-                )
+                self.logger.log(f"⚠️  Replay worker {worker_id} failed for {job.candidate.fingerprint[:12]}: {exc}")
 
     async def _apply_replay_result(self, candidate: Candidate, combined: EvalResult) -> None:
         self._remember_latest_result(candidate_key(candidate), combined)
@@ -1167,6 +1162,7 @@ class Orchestrator:
 
         # Track optimization start time for global timeout - BEFORE seed evaluation
         import time
+
         optimization_start_time = time.time()
         self._run_started_at = optimization_start_time
         self._control_heartbeat("running", force=True)
@@ -1275,7 +1271,9 @@ class Orchestrator:
             if self.config.max_optimization_time_seconds is not None:
                 elapsed = time.time() - optimization_start_time
                 if elapsed >= self.config.max_optimization_time_seconds:
-                    _debug_log(f"⏱️  TIMEOUT: Reached max optimization time ({elapsed:.1f}s >= {self.config.max_optimization_time_seconds:.1f}s)")
+                    _debug_log(
+                        f"⏱️  TIMEOUT: Reached max optimization time ({elapsed:.1f}s >= {self.config.max_optimization_time_seconds:.1f}s)"
+                    )
                     self._set_stop_reason("timeout")
                     # Cancel all in-flight tasks to exit quickly
                     if self._inflight_tasks:
@@ -1286,7 +1284,9 @@ class Orchestrator:
             # Check total cost limit
             if self.config.max_total_cost_dollars is not None:
                 if self.total_monetary_cost_spent_usd >= self.config.max_total_cost_dollars:
-                    _debug_log(f"💰 BUDGET CAP: Reached max cost (${self.total_monetary_cost_spent_usd:.4f} >= ${self.config.max_total_cost_dollars:.2f})")
+                    _debug_log(
+                        f"💰 BUDGET CAP: Reached max cost (${self.total_monetary_cost_spent_usd:.4f} >= ${self.config.max_total_cost_dollars:.2f})"
+                    )
                     self._set_stop_reason("cost_limit_exceeded")
                     # Cancel all in-flight tasks to exit quickly
                     if self._inflight_tasks:
@@ -1393,9 +1393,8 @@ class Orchestrator:
             hard_target = max(self._max_total_inflight, self.config.batch_size)
             need_depth = ready_depth < soft_target
             need_queue = len(self.queue) < hard_target and self._total_inflight >= max(1, hard_target // 2)
-            should_spawn_mutations = (
-                (need_depth or need_queue)
-                and (max_evaluations is None or self.evaluations_run < max_evaluations)
+            should_spawn_mutations = (need_depth or need_queue) and (
+                max_evaluations is None or self.evaluations_run < max_evaluations
             )
             network_throttled = self._is_network_throttled()
             if network_throttled and len(self._priority_queue) >= self._queue_refill_threshold():
@@ -1408,7 +1407,9 @@ class Orchestrator:
 
             # Debug mutation spawning logic
             if loop_iter % 100 == 0 and len(self.queue) == 0 and self._total_inflight == 0:
-                task_status = "None" if self._mutation_task is None else ("done" if self._mutation_task.done() else "running")
+                task_status = (
+                    "None" if self._mutation_task is None else ("done" if self._mutation_task.done() else "running")
+                )
                 _debug_log(
                     f"🔍 MUTATION CHECK: queue={len(self.queue)}, priority={len(self._priority_queue)}, "
                     f"target_soft={soft_target}, need_depth={need_depth}, need_queue={need_queue}, "
@@ -1424,18 +1425,13 @@ class Orchestrator:
 
                 # Spawn streaming mutation worker if no task is running
                 if self._mutation_task is None:
-                    _debug_log(
-                        f"🧬 Starting streaming mutation worker (ready={ready_depth}, target={soft_target})"
-                    )
+                    _debug_log(f"🧬 Starting streaming mutation worker (ready={ready_depth}, target={soft_target})")
                     self._mutation_task = asyncio.create_task(self._streaming_mutation_worker())
             else:
                 self._maybe_refill_queue()
 
             # 5) Window completion => keep round-indexed metrics in sync
-            if (
-                not self.queue
-                and (self._mutation_task is not None or self._total_inflight > 0)
-            ):
+            if not self.queue and (self._mutation_task is not None or self._total_inflight > 0):
                 import time as _time_debug
 
                 now = _time_debug.time()
@@ -1506,16 +1502,12 @@ class Orchestrator:
 
             # 6) Target quality guard - single source of truth:
             # stop once _maybe_record_target_hit has recorded time_to_target.
-            if (
-                self.config.target_quality is not None
-                and self.metrics.time_to_target_seconds is not None
-            ):
+            if self.config.target_quality is not None and self.metrics.time_to_target_seconds is not None:
                 self._set_stop_reason("target_quality")
                 # Cancel all in-flight evaluations so we can exit quickly
                 if self._inflight_tasks:
                     _debug_log(
-                        f"   Cancelling {len(self._inflight_tasks)} in-flight evaluations "
-                        "(target_quality reached)..."
+                        f"   Cancelling {len(self._inflight_tasks)} in-flight evaluations (target_quality reached)..."
                     )
                     for task in self._inflight_tasks.values():
                         task.cancel()
@@ -1638,6 +1630,7 @@ class Orchestrator:
         # Generate and save detailed report card
         try:
             from turbo_gepa.logging.report import generate_markdown_report
+
             report_content = generate_markdown_report(self)
             report_path = os.path.join(self.config.log_path, f"report_{self._run_id}.md")
             os.makedirs(os.path.dirname(report_path), exist_ok=True)
@@ -1723,7 +1716,7 @@ class Orchestrator:
         """Persist a minimal run JSON immediately with seed(s) as nodes.
 
         This ensures the live dashboard shows the OG seed node before the first
-        evaluation completes (useful for slow models).</n+        """
+        evaluation completes (useful for slow models).</n+"""
         try:
             dir_path = evo_dir or self._resolve_evo_dir()
             os.makedirs(dir_path, exist_ok=True)
@@ -1815,6 +1808,7 @@ class Orchestrator:
         roots = [n for n in nodes if indeg.get(n, 0) == 0]
         depth: dict[str, int] = dict.fromkeys(roots, 0)
         from collections import deque
+
         q = deque(roots)
         while q:
             n = q.popleft()
@@ -2026,6 +2020,7 @@ class Orchestrator:
                         LogLevel.DEBUG,
                     )
                 is_final_shard = shard_idx == len(self._runtime_shards) - 1
+
                 async def _on_partial(cand: Candidate, partial_res: EvalResult) -> None:
                     try:
                         ck = candidate_key(cand)
@@ -2171,7 +2166,9 @@ class Orchestrator:
                     parent_val = parent_objectives.get(self.config.promote_objective)
                     if isinstance(parent_val, (int, float)):
                         parent_score = float(parent_val)
-        prev_quality_val = prev_quality if isinstance(prev_quality, (int, float)) and prev_quality != float("-inf") else None
+        prev_quality_val = (
+            prev_quality if isinstance(prev_quality, (int, float)) and prev_quality != float("-inf") else None
+        )
         if isinstance(parent_score, (float, int)):
             delta_quality = quality - float(parent_score)
         elif prev_quality_val is not None:
@@ -2395,11 +2392,7 @@ class Orchestrator:
             missing = [ex for ex in expected_ids if ex not in seen_ids]
             if missing:
                 scheduled_replay = False
-                if (
-                    missing
-                    and self.config.replay_stragglers
-                    and self._replay_workers
-                ):
+                if missing and self.config.replay_stragglers and self._replay_workers:
                     await self._enqueue_replay_job(
                         candidate,
                         result,
@@ -2413,9 +2406,7 @@ class Orchestrator:
                     missing = []
                 else:
                     missing = [ex for ex in expected_ids if ex not in seen_ids]
-            if missing and (
-                not self.config.replay_stragglers or not self._replay_workers
-            ):
+            if missing and (not self.config.replay_stragglers or not self._replay_workers):
                 self.logger.log(
                     f"♻️  Replaying {len(missing)} missing examples on shard {shard_idx} ({shard_fraction:.0%}) "
                     f"for candidate {candidate.fingerprint[:12]}..."
@@ -2458,7 +2449,9 @@ class Orchestrator:
             self.logger.log("   This establishes the baseline for optimization.")
 
         seeds_count = max(1, len(seeds))
-        per_seed_budget = self._effective_concurrency // seeds_count if self._effective_concurrency >= seeds_count else 1
+        per_seed_budget = (
+            self._effective_concurrency // seeds_count if self._effective_concurrency >= seeds_count else 1
+        )
         seed_concurrency = max(1, min(len(shard), per_seed_budget or 1))
 
         results: list[EvalResult] = []
@@ -2515,10 +2508,7 @@ class Orchestrator:
         for seed, result in zip(seeds, results, strict=False):
             quality = result.objectives.get(self.config.promote_objective, 0.0)
             if self.show_progress:
-                self.logger.log(
-                    f"   📊 Seed quality on shard 0: {quality:.1%} "
-                    f"(fp={seed.fingerprint[:12]}...)"
-                )
+                self.logger.log(f"   📊 Seed quality on shard 0: {quality:.1%} (fp={seed.fingerprint[:12]}...)")
 
             candidate_with_meta, decision = await self._ingest_result(seed, result)
             self._record_best_quality(quality, shard_fraction)
@@ -2533,12 +2523,12 @@ class Orchestrator:
                         f"for full evaluation"
                     )
                 else:
-                    self.logger.log(
-                        f"   ⏸️  Seed decision: {decision}, current_rung={current_rung}"
-                    )
+                    self.logger.log(f"   ⏸️  Seed decision: {decision}, current_rung={current_rung}")
 
             # Mark seeds as generation 0
-            seed_key = candidate_with_meta.meta.get("_sched_key") if isinstance(candidate_with_meta.meta, dict) else None
+            seed_key = (
+                candidate_with_meta.meta.get("_sched_key") if isinstance(candidate_with_meta.meta, dict) else None
+            )
             if not isinstance(seed_key, str):
                 seed_key = candidate_with_meta.fingerprint
             self._candidate_generations[seed_key] = 0
@@ -2599,7 +2589,7 @@ class Orchestrator:
         tol = 1e-6
         best = 0.0
         promote_obj = self.config.promote_objective
-        
+
         # Scan latest results instead of Pareto to catch non-optimal but high-quality runs
         for result in self.latest_results.values():
             sf = result.shard_fraction if result.shard_fraction is not None else 0.0
@@ -2607,7 +2597,7 @@ class Orchestrator:
                 q = result.objectives.get(promote_obj, 0.0)
                 if q > best:
                     best = float(q)
-        
+
         return best
 
     def _get_generation(self, candidate: Candidate) -> int | None:
@@ -2667,7 +2657,9 @@ class Orchestrator:
             for rung_idx in rungs_generating:
                 self.scheduler.mark_generation_start(rung_idx)
 
-            self.logger.log(f"🧬 Streaming {num_mutations} mutations from {len(entries)} parents (rungs: {sorted(rungs_generating)})")
+            self.logger.log(
+                f"🧬 Streaming {num_mutations} mutations from {len(entries)} parents (rungs: {sorted(rungs_generating)})"
+            )
 
             # Generate mutations - they stream directly to queue via candidate_sink
             try:
@@ -2682,7 +2674,9 @@ class Orchestrator:
             # Note: Candidates already enqueued via streaming sink - just record metrics
             self._record_mutation_enqueued(len(mutations))
             if self.show_progress:
-                self.logger.log(f"   ✅ {len(mutations)} mutations streamed to queue (total enqueued: {self._mutations_enqueued})")
+                self.logger.log(
+                    f"   ✅ {len(mutations)} mutations streamed to queue (total enqueued: {self._mutations_enqueued})"
+                )
         finally:
             # CRITICAL: Clear task handle so next evaluation can trigger a new worker
             # Without this, the handle points to a done task and new workers won't spawn correctly
@@ -2717,13 +2711,9 @@ class Orchestrator:
         )
 
         # Log that we're actually going to try generating
-        self.logger.log(
-            f"🔬 spawn_mutations: WILL GENERATE {num_mutations} mutations from {len(entries)} parents"
-        )
+        self.logger.log(f"🔬 spawn_mutations: WILL GENERATE {num_mutations} mutations from {len(entries)} parents")
 
-        self.logger.log(
-            f"🧭 spawn_mutations: parents={len(entries)} budget={num_mutations} queue={len(self.queue)}"
-        )
+        self.logger.log(f"🧭 spawn_mutations: parents={len(entries)} budget={num_mutations} queue={len(self.queue)}")
 
         # Catch timeouts and other RuntimeErrors from LLM calls gracefully
         try:
@@ -2756,7 +2746,9 @@ class Orchestrator:
                 callback(candidate)
         else:
             for candidate in mutations:
-                self._stamp_island_metadata(candidate, source=candidate.meta.get("source") if isinstance(candidate.meta, dict) else None)
+                self._stamp_island_metadata(
+                    candidate, source=candidate.meta.get("source") if isinstance(candidate.meta, dict) else None
+                )
             self.enqueue(mutations)
 
     async def _generate_mutations_batched(
@@ -2921,11 +2913,38 @@ class Orchestrator:
             # It's safe to mutate from pending parents using their latest evaluation results.
 
             lineage = list(self._lineage_history.get(parent_key, ()))
+
+            # Extract diagnostics from traces for evaluator_feedback_reflection strategy
+            diagnostics_list: list[dict[str, object]] = []
+            traces_for_context: list[dict[str, object]] = []
+            if latest_result is not None:
+                # Gather per-trace diagnostics
+                for trace in latest_result.traces[:10]:  # Limit to avoid bloat
+                    if isinstance(trace, dict):
+                        traces_for_context.append(trace)
+                        diag = trace.get("diagnostic")
+                        if isinstance(diag, dict):
+                            diagnostics_list.append(diag)
+                # Also include aggregated diagnostic if present
+                if latest_result.diagnostic and isinstance(latest_result.diagnostic, dict):
+                    # Merge aggregated suggestions into diagnostics list
+                    agg_suggestions = latest_result.diagnostic.get("suggestions", [])
+                    if agg_suggestions and isinstance(agg_suggestions, list):
+                        diagnostics_list.append(
+                            {
+                                "failure_stage": latest_result.diagnostic.get("primary_failure_stage"),
+                                "suggestions": agg_suggestions,
+                            }
+                        )
+
             parent_contexts.append(
                 {
                     "candidate": candidate_with_parent,
                     "failures": [],  # Not used anymore, we have fresh reflection_examples
                     "lineage": lineage,
+                    # New: diagnostics for evaluator_feedback_reflection strategy
+                    "diagnostics": diagnostics_list,
+                    "traces": traces_for_context,
                 }
             )
 
@@ -2950,11 +2969,12 @@ class Orchestrator:
         async def stream_candidate_to_queue(candidate: Candidate) -> None:
             """Called by mutator for each candidate as soon as it's created."""
             # Enqueue immediately - this feeds the priority queue while mutations are still generating
-            self._stamp_island_metadata(candidate, source=candidate.meta.get("source") if isinstance(candidate.meta, dict) else None)
+            self._stamp_island_metadata(
+                candidate, source=candidate.meta.get("source") if isinstance(candidate.meta, dict) else None
+            )
             self._buffer_mutation(candidate)
-            if (
-                len(self._priority_queue) < self.config.eval_concurrency
-                or (not self._is_network_throttled() and len(self._priority_queue) < self._queue_refill_threshold() // 2)
+            if len(self._priority_queue) < self.config.eval_concurrency or (
+                not self._is_network_throttled() and len(self._priority_queue) < self._queue_refill_threshold() // 2
             ):
                 self._maybe_refill_queue(max_items=1, force=True)
             if self.show_progress:
@@ -2984,7 +3004,9 @@ class Orchestrator:
         generated = len(mutations)
         self._mutations_generated += generated
         for candidate in mutations:
-            self._stamp_island_metadata(candidate, source=candidate.meta.get("source") if isinstance(candidate.meta, dict) else None)
+            self._stamp_island_metadata(
+                candidate, source=candidate.meta.get("source") if isinstance(candidate.meta, dict) else None
+            )
             meta = candidate.meta if isinstance(candidate.meta, dict) else {}
             child_key = meta.get("_sched_key") if isinstance(meta, dict) else None
             if not isinstance(child_key, str):
@@ -3062,11 +3084,15 @@ class Orchestrator:
         }
         if include_edges:
             snapshot["parent_children"] = {
-                self._sched_to_fingerprint.get(parent, parent): [self._sched_to_fingerprint.get(child, child) for child in children]
+                self._sched_to_fingerprint.get(parent, parent): [
+                    self._sched_to_fingerprint.get(child, child) for child in children
+                ]
                 for parent, children in self._parent_children.items()
             }
             snapshot["children"] = [self._sched_to_fingerprint.get(child, child) for child in self._children_seen]
-            snapshot["promoted_children"] = [self._sched_to_fingerprint.get(child, child) for child in self._promoted_children]
+            snapshot["promoted_children"] = [
+                self._sched_to_fingerprint.get(child, child) for child in self._promoted_children
+            ]
         if self._migration_events:
             snapshot["migration_events"] = list(self._migration_events)
         return snapshot
@@ -3217,7 +3243,18 @@ class Orchestrator:
                 stored = self._candidate_island_meta.get(p_fp, {})
                 origin = stored.get("origin")
                 current = stored.get("current")
-                _add_entry(p_fp, parent_key, p_quality, p_shard, "other", getattr(p_cand, "text", None), None, origin, current, None)
+                _add_entry(
+                    p_fp,
+                    parent_key,
+                    p_quality,
+                    p_shard,
+                    "other",
+                    getattr(p_cand, "text", None),
+                    None,
+                    origin,
+                    current,
+                    None,
+                )
             # Children
             for child_key in list(children):
                 c_fp, c_cand = _resolve(child_key)
@@ -3236,7 +3273,18 @@ class Orchestrator:
                 stored = self._candidate_island_meta.get(c_fp, {})
                 origin = stored.get("origin")
                 current = stored.get("current")
-                _add_entry(c_fp, child_key, c_quality, c_shard, "other", getattr(c_cand, "text", None), None, origin, current, None)
+                _add_entry(
+                    c_fp,
+                    child_key,
+                    c_quality,
+                    c_shard,
+                    "other",
+                    getattr(c_cand, "text", None),
+                    None,
+                    origin,
+                    current,
+                    None,
+                )
 
         return data
 
@@ -3656,6 +3704,7 @@ class Orchestrator:
                     LogLevel.WARNING,
                 )
         return limit
+
     def _clamp_rung_index(self, idx: int) -> int:
         if not self._runtime_shards:
             return 0
