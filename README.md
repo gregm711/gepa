@@ -23,7 +23,7 @@
 - ⚡ **Maximized Concurrency**: Async orchestration scales to available compute (bounded by shard size + `max_total_inflight` per island)
 - 🏝️ **Island-Based Parallelism**: Concurrent islands broadcast elites across the swarm to preserve diversity without extra processes
 - 📊 **ASHA-Style Ladder**: Parent-gated rung promotions prune weak lineages early without cohort halving
-- 🧬 **Dual Mutation Strategy**: Blends reflection edits with Prompt-MII-style spec induction for exploration vs. exploitation
+- 🧬 **Triple Mutation Strategy**: Blends incremental reflection, Prompt-MII-style spec induction, and interleaved thinking for exploration vs. exploitation
 - 📈 **Parent-Weighted Scheduling**: Recent improvement history boosts promising lineages to the front of the queue
 - 🌡️ **Two-Phase Optimization**: Prompt evolution first, optional temperature sweep second
 - 🚦 **Convergence & Lineage Guards**: Per-candidate auto-stop and lineage fast-tracks keep stagnating prompts moving forward
@@ -401,23 +401,23 @@ The AIME Turbo benchmark configuration uses all three strategies by default; you
 
 ```mermaid
 graph TB
-    Start[Input<br/>Dataset + Seed Prompts] --> Phase1{Phase 1<br/>Optimization Loop}
+    Start[Input: Dataset + Seed Prompts] --> Phase1[Phase 1: Optimization Loop]
 
-    Phase1 --> Mutate[Generate Mutations<br/>Reflection + Spec Induction]
-    Mutate --> Eval[ASHA Evaluation<br/>Concurrent async]
-    Eval --> Archive[Update Archive<br/>Pareto Frontier]
-    Archive --> Check1{Quality<br/>Target Met?}
+    Phase1 --> Mutate[Generate Mutations: Reflection + Spec Induction]
+    Mutate --> Eval[ASHA Evaluation: Concurrent async]
+    Eval --> Archive[Update Archive: Pareto Frontier]
+    Archive --> Check1{Quality Target Met?}
 
     Check1 -->|No| Phase1
-    Check1 -->|Yes| Phase2{Phase 2 (optional)<br/>Temperature Cycling}
+    Check1 -->|Yes| Phase2[Phase 2 optional: Temperature Cycling]
 
-    Phase2 --> TempExplore[Temperature Exploration<br/>±0.2 variations]
+    Phase2 --> TempExplore[Temperature Exploration: +/- 0.2 variations]
     TempExplore --> EvalTemp[Evaluate Variants]
     EvalTemp --> ArchiveTemp[Update Archive]
-    ArchiveTemp --> Check2{Auto-Stop<br/>Criteria?}
+    ArchiveTemp --> Check2{Auto-Stop Criteria?}
 
     Check2 -->|No improvement| Phase2
-    Check2 -->|Converged| Results[Output<br/>Best Candidate<br/>Pareto Frontier]
+    Check2 -->|Converged| Results[Output: Best Candidate + Pareto Frontier]
 
     style Start fill:#e1f5ff
     style Phase1 fill:#fff3cd
@@ -442,47 +442,36 @@ graph TB
 ```mermaid
 graph TD
     subgraph Island1[Island 1]
-    Pop1[Population 1<br/>25 candidates]
-    Arch1[Local Archive]
+    Pop1[Population]
+    Arch1[Archive]
     end
 
     subgraph Island2[Island 2]
-    Pop2[Population 2<br/>25 candidates]
-    Arch2[Local Archive]
+    Pop2[Population]
+    Arch2[Archive]
     end
 
     subgraph Island3[Island 3]
-    Pop3[Population 3<br/>25 candidates]
-    Arch3[Local Archive]
+    Pop3[Population]
+    Arch3[Archive]
     end
 
     subgraph Island4[Island 4]
-    Pop4[Population 4<br/>25 candidates]
-    Arch4[Local Archive]
+    Pop4[Population]
+    Arch4[Archive]
     end
 
-    Arch1 -->|Continuously<br/>Top-3 elites| Pop2
-    Arch2 -->|Continuously<br/>Top-3 elites| Pop3
-    Arch3 -->|Continuously<br/>Top-3 elites| Pop4
-    Arch4 -->|Continuously<br/>Top-3 elites| Pop1
+    Arch1 <-.->|Broadcast top-K elites| Arch2
+    Arch1 <-.->|Broadcast top-K elites| Arch3
+    Arch1 <-.->|Broadcast top-K elites| Arch4
+    Arch2 <-.->|Broadcast top-K elites| Arch3
+    Arch2 <-.->|Broadcast top-K elites| Arch4
+    Arch3 <-.->|Broadcast top-K elites| Arch4
 
     style Island1 fill:#e3f2fd
     style Island2 fill:#f3e5f5
     style Island3 fill:#e8f5e9
     style Island4 fill:#fff3e0
-
-    Arch1 -->|Broadcast| Pop2
-    Arch1 -->|Broadcast| Pop3
-    Arch1 -->|Broadcast| Pop4
-    Arch2 -->|Broadcast| Pop1
-    Arch2 -->|Broadcast| Pop3
-    Arch2 -->|Broadcast| Pop4
-    Arch3 -->|Broadcast| Pop1
-    Arch3 -->|Broadcast| Pop2
-    Arch3 -->|Broadcast| Pop4
-    Arch4 -->|Broadcast| Pop1
-    Arch4 -->|Broadcast| Pop2
-    Arch4 -->|Broadcast| Pop3
 ```
 
 **Benefits**:
@@ -498,48 +487,44 @@ graph TD
 ```mermaid
 graph TB
     subgraph Phase1["Phase 1: Prompt Evolution"]
-        Start[Parent Contexts<br/>prompt + traces + failures] --> Allocate{Adaptive Budget<br/>Allocation}
+        Start[Parent Contexts: prompt + traces + failures] --> Allocate{Adaptive Budget Allocation}
 
-        Allocate -->|60-70%| Reflection[Incremental Reflection]
-        Allocate -->|30-40%| SpecInd[Spec Induction<br/>Prompt-MII]
+        Allocate --> Reflection[Incremental Reflection]
+        Allocate --> SpecInd[Spec Induction]
+        Allocate --> Interleaved[Interleaved Thinking]
 
-        Reflection --> RefPrompt["LLM Prompt:<br/>'Edit this prompt to fix failures'"]
-        SpecInd --> SpecPrompt["LLM Prompt:<br/>'Generate FRESH spec from patterns'"]
+        Reflection --> RefLLM[Reflection LLM]
+        SpecInd --> RefLLM
+        Interleaved --> RefLLM
 
-        RefPrompt --> RefLLM[Reflection LLM]
-        SpecPrompt --> RefLLM
+        RefLLM --> Pool[Candidate Pool]
 
-        RefLLM --> RefOut[Edited prompts<br/>incremental changes]
-        RefLLM --> SpecOut[Fresh specifications<br/>novel approaches]
-
-        RefOut --> Pool[Candidate Pool]
-        SpecOut --> Pool
-
-        Pool --> Validate{Pass<br/>Validators?}
+        Pool --> Validate{Pass Validators?}
         Validate -->|Yes| ASHA1[ASHA Evaluation]
         Validate -->|No| Discard[Discard]
 
-        ASHA1 --> Archive1[Archive<br/>Pareto Frontier]
+        ASHA1 --> Archive1[Archive: Pareto Frontier]
     end
 
-    Archive1 --> Convergence{Converged?<br/>Auto-Stop}
+    Archive1 --> Convergence{Converged or Auto-Stop?}
     Convergence -->|Yes| Phase2Start[Phase 2 Begins]
     Convergence -->|No| Start
 
     subgraph Phase2["Phase 2: Temperature Cycling"]
-        Phase2Start --> TopPrompts[Select Top Prompts<br/>from Phase 1]
-        TopPrompts --> TempRange["Generate Temperature Variants<br/>0.0, 0.3, 0.5, 0.7, 1.0<br/>±0.2 around baseline"]
-        TempRange --> ASHA2[ASHA Evaluation<br/>Temperature Grid]
-        ASHA2 --> Archive2[Final Archive<br/>Best prompt + temperature]
+        Phase2Start --> TopPrompts[Select Top Prompts from Phase 1]
+        TopPrompts --> TempRange[Generate Temperature Variants]
+        TempRange --> ASHA2[ASHA Evaluation: Temperature Grid]
+        ASHA2 --> Archive2[Final Archive: Best prompt + temperature]
     end
 
-    Archive2 --> Results[Optimized Prompt<br/>+ Optimal Temperature]
+    Archive2 --> Results[Optimized Prompt + Optimal Temperature]
 
     style Phase1 fill:#e3f2fd
     style Phase2 fill:#fff3e0
     style Start fill:#e1f5ff
     style Reflection fill:#d4edda
     style SpecInd fill:#fff3cd
+    style Interleaved fill:#e8daef
     style Archive1 fill:#d1ecf1
     style Archive2 fill:#d1ecf1
     style Results fill:#c8e6c9
@@ -548,7 +533,7 @@ graph TB
 
 **Phase 1: Prompt Evolution**
 
-TurboGEPA uses two complementary mutation strategies that both receive the same context (parent prompts + execution traces + failures):
+TurboGEPA uses three complementary mutation strategies that all receive the same context (parent prompts + execution traces + failures):
 
 #### 1. **Incremental Reflection**
 
@@ -562,7 +547,13 @@ TurboGEPA uses two complementary mutation strategies that both receive the same 
 - **Approach**: "Looking at this prompt and what failed, generate a FRESH specification that solves the task differently."
 - **Best for**: Exploration, escaping local optima, discovering novel approaches
 
-**Operator weighting:** TurboGEPA tracks per-operator success rates via `Metrics` and can bias mutation budgets toward strategies that are working well, but the exact 60/40 split is conceptual here rather than a hard-coded allocator.
+#### 3. **Interleaved Thinking**
+
+- **Strategy**: Teach the model to alternate between reasoning and answering
+- **Approach**: Generate prompts that enforce `<think>` (private reasoning) and `<answer>` (public output) blocks
+- **Best for**: Math, safety, or audit-friendly flows requiring explicit reasoning traces
+
+**Operator weighting:** TurboGEPA tracks per-operator success rates via `Metrics` and can bias mutation budgets toward strategies that are working well. Budget allocation is dynamic rather than hard-coded.
 
 **Auto-Stop:** Phase 1 automatically terminates when convergence is detected (no improvement across multiple rounds) or a target quality threshold is hit, saving compute.
 
@@ -583,11 +574,11 @@ TurboGEPA adds **performance engineering** without changing core algorithm:
 
 ```mermaid
 graph TD
-    Eval[Evaluate candidate on rung_i<br/>shard fraction] --> Gate{Parent-aware gate}
-    Gate -->|Seed| PromoteSeed[Promote to rung_{i+1}]
-    Gate -->|Child score ≥ parent@rung_i − tol| PromoteVar[Promote to rung_{i+1}]
-    Gate -->|Child score < parent@rung_i − tol| Prune[Prune candidate]
-    Gate -->|Final rung reached| Complete[Mark completed<br/>archive + coverage stats]
+    Eval[Evaluate candidate on shard fraction] --> Gate{Parent-aware gate}
+    Gate -->|Seed| PromoteSeed[Promote to next rung]
+    Gate -->|Child >= parent - tolerance| PromoteVar[Promote to next rung]
+    Gate -->|Child < parent - tolerance| Prune[Prune candidate]
+    Gate -->|Final rung reached| Complete[Mark completed + archive]
 
     style Eval fill:#fff3cd
     style Gate fill:#ffeaa7
