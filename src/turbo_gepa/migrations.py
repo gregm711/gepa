@@ -14,7 +14,7 @@ import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, Sequence
 
 if TYPE_CHECKING:  # pragma: no cover
     from turbo_gepa.islands import IslandContext
@@ -29,10 +29,12 @@ def _serialize_candidate(candidate: Candidate) -> dict[str, object]:
     }
 
 
-def _deserialize_candidate(payload: dict[str, object]) -> Candidate:
+def _deserialize_candidate(payload: dict[str, Any]) -> Candidate:
+    meta_raw = payload.get("meta", {})
+    meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
     return Candidate(
         text=str(payload.get("text", "")),
-        meta=dict(payload.get("meta", {})),
+        meta=meta,
     )
 
 
@@ -125,7 +127,7 @@ class FileMigrationBackend(MigrationBackend):
             if os.name == "nt":  # pragma: no cover - windows specific
                 import msvcrt
 
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
             else:  # pragma: no cover - unix specific
                 import fcntl
 
@@ -136,7 +138,7 @@ class FileMigrationBackend(MigrationBackend):
                 if os.name == "nt":  # pragma: no cover - windows specific
                     import msvcrt
 
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
                 else:  # pragma: no cover - unix specific
                     import fcntl
 

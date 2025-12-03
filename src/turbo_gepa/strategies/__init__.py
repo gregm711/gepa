@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 StrategyPromptBuilder = Callable[
-    [Sequence[dict[str, object]], Sequence[dict[str, object]], Sequence[dict[str, object]], int],
+    [Sequence[dict[str, Any]], Sequence[dict[str, Any]], Sequence[dict[str, Any]], int],
     str,
 ]
 StrategyResponseParser = Callable[[str], list[str]]
@@ -31,7 +31,7 @@ class ReflectionStrategy:
     requires_examples: bool = False  # True if builder expects task examples
 
 
-def _format_parent_summaries(parent_contexts: Sequence[dict[str, object]]) -> str:
+def _format_parent_summaries(parent_contexts: Sequence[dict[str, Any]]) -> str:
     """Render parent prompt summaries similar to the original reflection runner."""
 
     summaries: list[str] = []
@@ -70,7 +70,7 @@ def _format_parent_summaries(parent_contexts: Sequence[dict[str, object]]) -> st
     return "\n".join(summaries)
 
 
-def _format_reflection_examples(reflection_examples: Sequence[dict[str, object]]) -> str:
+def _format_reflection_examples(reflection_examples: Sequence[dict[str, Any]]) -> str:
     """Summarize previous reflections/examples for few-shot guidance."""
 
     if not reflection_examples:

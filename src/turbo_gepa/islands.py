@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Coroutine, Iterable, cast
 
 from .interfaces import Candidate
 
@@ -36,8 +36,8 @@ async def spawn_islands(
         n_islands: Number of islands to spawn
         worker: Async function to run on each island
     """
-    tasks: list[asyncio.Task] = []
-    queues = [asyncio.Queue() for _ in range(n_islands)]
+    tasks: list[asyncio.Task[None]] = []
+    queues: list[asyncio.Queue[Candidate]] = [asyncio.Queue() for _ in range(n_islands)]
 
     for idx in range(n_islands):
         inbound = queues[idx]
@@ -49,7 +49,7 @@ async def spawn_islands(
             metrics_queue=metrics_queue,
             all_queues=queues,
         )
-        task = asyncio.create_task(worker(context))
+        task: asyncio.Task[None] = asyncio.create_task(cast(Coroutine[Any, Any, None], worker(context)))
         tasks.append(task)
 
     return tasks

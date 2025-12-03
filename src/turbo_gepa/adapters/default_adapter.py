@@ -117,7 +117,7 @@ class DefaultDataInst:
     difficulty: float | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "input": self.input,
             "answer": self.answer,
         }
@@ -212,6 +212,11 @@ class DefaultAdapter:
             eval_fn=my_eval_fn,
         )
     """
+
+    # Class-level type annotations for mypy inference
+    task_model: ModelConfig
+    reflection_model: ModelConfig
+    _metrics: Any
 
     def __init__(
         self,
@@ -367,7 +372,7 @@ class DefaultAdapter:
         # Pass temperature support flag to mutator
         self._mutation_config = mutation_config or MutationConfig(
             reflection_batch_size=config.reflection_batch_size,
-            max_mutations=config.max_mutations_per_round,
+            max_mutations=config.max_mutations_per_round or 8,
             max_tokens=config.max_tokens,
             objective_key=config.promote_objective,
         )
@@ -383,6 +388,7 @@ class DefaultAdapter:
         self.log_dir = self.base_log_dir
 
         # Shared HTTP client for all LLM calls (caps sockets, reuses TLS, HTTP/2)
+        self._httpx_client: Any = None  # Will be httpx.AsyncClient if available
         try:
             import httpx
 
@@ -397,7 +403,7 @@ class DefaultAdapter:
             timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
             self._httpx_client = httpx.AsyncClient(http2=True, limits=limits, timeout=timeout)
         except Exception:
-            self._httpx_client = None
+            pass  # Already set to None above
 
     @staticmethod
     def _resolve_log_level(level: str) -> LogLevel:
@@ -751,7 +757,7 @@ class DefaultAdapter:
         return str(island_path)
 
     def _combine_evolution_snapshots(self, snapshots: Sequence[dict[str, Any]]) -> dict[str, Any]:
-        combined = {
+        combined: dict[str, Any] = {
             "mutations_requested": 0,
             "mutations_generated": 0,
             "mutations_enqueued": 0,
@@ -930,12 +936,12 @@ class DefaultAdapter:
 
         # Fallback #2: current Pareto entries, preferring deepest shard even if partial
         if best_prompt is None:
-            entries: list[dict[str, Any]] = []
-            for entry in pareto_entries:
-                packed = _pack_candidate(entry.candidate, entry.result)
+            pareto_packed: list[dict[str, Any]] = []
+            for pareto_entry in pareto_entries:
+                packed = _pack_candidate(pareto_entry.candidate, pareto_entry.result)
                 if packed:
-                    entries.append(packed)
-            best_entry = _pick_best(entries)
+                    pareto_packed.append(packed)
+            best_entry = _pick_best(pareto_packed)
             if best_entry:
                 best_prompt = best_entry["candidate"].text
                 best_quality = best_entry["quality"]
@@ -1013,7 +1019,7 @@ class DefaultAdapter:
             promote_objective=self.config.promote_objective,
             cancel_stragglers_immediately=self.config.cancel_stragglers_immediately,
             replay_stragglers=self.config.replay_stragglers,
-            min_samples_for_confidence=self.config.min_samples_for_confidence,
+            min_samples_for_confidence=self.config.min_samples_for_confidence or 20,
             target_quality=self.config.target_quality,
             confidence_z=self.config.confidence_z,
         )
@@ -1292,7 +1298,7 @@ class DefaultAdapter:
             promote_objective=self.config.promote_objective,
             cancel_stragglers_immediately=self.config.cancel_stragglers_immediately,
             replay_stragglers=self.config.replay_stragglers,
-            min_samples_for_confidence=self.config.min_samples_for_confidence,
+            min_samples_for_confidence=self.config.min_samples_for_confidence or 20,
             target_quality=self.config.target_quality,
             # Judge options
             judge_fn=judge_fn,

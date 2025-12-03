@@ -536,16 +536,16 @@ class Metrics:
                 )
 
         if self.time_to_target_seconds is None and self.time_to_best_rung is not None:
-            rung = self.highest_rung_fraction
-            baseline_rung = self.rung_baselines.get(round(rung, 4))
-            rung_score = None
+            rung_frac = self.highest_rung_fraction
+            baseline_rung = self.rung_baselines.get(round(rung_frac, 4))
+            rung_score: float | None = None
             if baseline_rung is not None and self.time_to_best_rung > 0:
                 gain = self.best_rung_quality - baseline_rung
                 rung_score = gain / self.time_to_best_rung if gain > 0 else 0.0
             lines.extend(
                 [
                     "🚀 Rung Metric:",
-                    f"  Rung={rung:.2f} quality={self.best_rung_quality:.3f}",
+                    f"  Rung={rung_frac:.2f} quality={self.best_rung_quality:.3f}",
                     f"  Time to rung: {self.time_to_best_rung:.1f}s",
                     f"  Rung score: {rung_score:.4f}" if rung_score is not None else "  Rung score: n/a",
                     "",

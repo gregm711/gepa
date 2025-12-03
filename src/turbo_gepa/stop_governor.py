@@ -14,6 +14,7 @@ It stops when all signals indicate plateau, with hysteresis to avoid premature s
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -229,7 +230,7 @@ class StopGovernor:
 
         return stop_score, signals
 
-    def should_stop(self) -> tuple[bool, dict[str, any]]:
+    def should_stop(self) -> tuple[bool, dict[str, Any]]:
         """
         Determine if optimization should stop.
 
@@ -336,7 +337,7 @@ def compute_hypervolume_2d(
         return 0.0
 
     # Filter dominated points and sort by quality (descending)
-    pareto = []
+    pareto: list[tuple[float, float]] = []
     for q, c in points:
         dominated = False
         for pq, pc in pareto:

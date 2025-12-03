@@ -25,11 +25,11 @@ class SchedulerConfig:
 
     # Variance-aware promotion: rung-specific tolerance values
     # Higher tolerance at smaller rungs accounts for score noise with fewer examples
-    variance_tolerance: dict[float, float]
+    variance_tolerance: dict[float, float] | None = None
 
     # Shrinkage coefficients for estimating parent@rung_i from parent@final when unavailable
     # Higher alpha = more weight to parent's final score (less shrinkage toward baseline)
-    shrinkage_alpha: dict[float, float]
+    shrinkage_alpha: dict[float, float] | None = None
 
     patience_generations: int = 3  # Generations without improvement before convergence
 
@@ -57,9 +57,9 @@ class BudgetedScheduler:
         # Per-rung score tracking: (candidate_key, rung_idx) -> score
         self._rung_scores: dict[tuple[str, int], float] = {}
 
-        # Variance-aware tolerance and shrinkage (required parameters)
-        self.variance_tolerance = dict(config.variance_tolerance)
-        self.shrinkage_alpha = dict(config.shrinkage_alpha)
+        # Variance-aware tolerance and shrinkage (defaults to empty if not provided)
+        self.variance_tolerance = dict(config.variance_tolerance) if config.variance_tolerance else {}
+        self.shrinkage_alpha = dict(config.shrinkage_alpha) if config.shrinkage_alpha else {}
 
         # Convergence tracking per rung: generation + evaluation counters
         # rung_idx -> {

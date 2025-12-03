@@ -47,8 +47,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
-import dspy
-from dspy.primitives import Example, Prediction
+import dspy  # type: ignore[import-untyped]
+from dspy.primitives import Example, Prediction  # type: ignore[import-untyped]
 
 from turbo_gepa.archive import Archive
 from turbo_gepa.cache import DiskCache
@@ -159,10 +159,10 @@ class DSpyAdapter:
         self._async_random = random.Random()
 
         async def batch_reflection_runner(
-            parent_contexts: list[dict[str, object]],
+            parent_contexts: Sequence[dict[str, Any]],
             num_mutations: int,
-            _task_examples: list[dict[str, object]] | None = None,
-        ) -> list[str]:
+            _task_examples: list[dict[str, Any]] | None = None,
+        ) -> Sequence[str]:
             if num_mutations <= 0 or not parent_contexts:
                 return []
             proposals: list[str] = []
@@ -190,7 +190,7 @@ class DSpyAdapter:
         self.mutator = Mutator(
             MutationConfig(
                 reflection_batch_size=config.reflection_batch_size,
-                max_mutations=config.max_mutations_per_round,
+                max_mutations=config.max_mutations_per_round or 8,
                 max_tokens=config.max_tokens,
                 objective_key=config.promote_objective,
             ),
@@ -212,7 +212,7 @@ class DSpyAdapter:
         example: Example,
         example_id: str,
         capture_traces: bool = False,
-    ) -> dict[str, float]:
+    ) -> dict[str, Any]:
         """Evaluate program on a single example (async)."""
         # Run in thread pool since DSPy evaluation is sync
         loop = asyncio.get_event_loop()
@@ -221,7 +221,7 @@ class DSpyAdapter:
             try:
                 if capture_traces:
                     # Use bootstrap_trace_data for trace capture
-                    from dspy.teleprompt.bootstrap_trace import bootstrap_trace_data
+                    from dspy.teleprompt.bootstrap_trace import bootstrap_trace_data  # type: ignore[import-untyped]
 
                     trajs = bootstrap_trace_data(
                         program=program,
@@ -458,7 +458,7 @@ class DSpyAdapter:
         Returns:
             Dict mapping predictor names to lists of feedback samples
         """
-        dataset = {pred_name: [] for pred_name in current_instructions.keys()}
+        dataset: dict[str, list[Any]] = {pred_name: [] for pred_name in current_instructions.keys()}
 
         for trace in traces:
             # Extract trace data
@@ -552,7 +552,7 @@ class DSpyAdapter:
             promote_objective=objective,
             cancel_stragglers_immediately=self.config.cancel_stragglers_immediately,
             replay_stragglers=self.config.replay_stragglers,
-            min_samples_for_confidence=self.config.min_samples_for_confidence,
+            min_samples_for_confidence=self.config.min_samples_for_confidence or 20,
             target_quality=self.config.target_quality,
             confidence_z=self.config.confidence_z,
         )

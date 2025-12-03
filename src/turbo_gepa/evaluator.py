@@ -658,7 +658,7 @@ class AsyncEvaluator:
             )
 
             for task in done:
-                info = pending.pop(task, None)
+                _info = pending.pop(task, {})
                 try:
                     await task  # Collect result (already added to results by eval_one)
                 except asyncio.CancelledError:
@@ -846,6 +846,9 @@ class AsyncEvaluator:
         if not self.judge_fn or not traces:
             return traces, None
 
+        # Capture judge_fn for use in nested function (mypy narrowing)
+        judge_fn = self.judge_fn
+
         # Select traces to judge based on sampling and failure filter
         candidates_for_judging: list[tuple[int, dict[str, Any]]] = []
         for idx, trace in enumerate(traces):
@@ -897,7 +900,7 @@ class AsyncEvaluator:
                     if trace.get("additional_context"):
                         example["additional_context"] = trace["additional_context"]
 
-                    diagnostic = await self.judge_fn(output, expected, example, candidate)
+                    diagnostic = await judge_fn(output, expected, example, candidate)
                     return idx, diagnostic
                 except Exception as e:
                     self.logger.log(

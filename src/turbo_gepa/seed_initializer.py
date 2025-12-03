@@ -106,7 +106,7 @@ async def initialize_seeds_from_examples(
         induction_prompt = _build_induction_prompt(examples_text, num_seeds)
 
     # Call reflection LLM to generate specs
-    completion_kwargs = {
+    completion_kwargs: dict[str, Any] = {
         "model": reflection_lm,
         "messages": [{"role": "user", "content": induction_prompt}],
     }

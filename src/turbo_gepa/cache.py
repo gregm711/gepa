@@ -97,7 +97,7 @@ class DiskCache:
             if os.name == "nt":  # pragma: no cover - windows specific
                 import msvcrt
 
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
             else:  # pragma: no cover - unix specific
                 import fcntl
 
@@ -108,7 +108,7 @@ class DiskCache:
                 if os.name == "nt":  # pragma: no cover - windows specific
                     import msvcrt
 
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
                 else:  # pragma: no cover - unix specific
                     import fcntl
 
@@ -451,6 +451,7 @@ class DiskCache:
                 # Corrupted state file, return None to start fresh
                 logging.warning("Corrupted state file, starting fresh: %s", e)
                 return None
+        return None  # All retries exhausted
 
     def has_state(self) -> bool:
         """Check if saved state exists."""

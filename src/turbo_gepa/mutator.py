@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable, Sequence
+from typing import Any, Awaitable, Callable, Coroutine, Iterable, Sequence, cast
 
 from turbo_gepa.logging.logger import LoggerProtocol, LogLevel, StdOutLogger
 
 from .interfaces import Candidate
 
 StrategyRunner = Callable[
-    [Sequence[dict[str, object]], int, list[dict[str, object]] | None],
+    [Sequence[dict[str, Any]], int, list[dict[str, Any]] | None],
     Awaitable[Sequence[str]],
 ]
 BatchReflectionRunner = StrategyRunner
@@ -70,7 +71,7 @@ class Mutator:
         self.batch_reflection_runner = batch_reflection_runner
         self.spec_induction_runner = spec_induction_runner
         self.temperature_mutations_enabled = temperature_mutations_enabled
-        self._reflection_examples: list[dict[str, object]] = []
+        self._reflection_examples: list[dict[str, Any]] = []
         self._operator_stats: dict[str, dict[str, float]] = {
             "temperature_shift": {"trials": 0, "delta_sum": 0.0, "generated": 0, "promoted": 0},
             "incremental_reflection": {"trials": 0, "delta_sum": 0.0, "generated": 0, "promoted": 0},
@@ -81,7 +82,7 @@ class Mutator:
         self._metrics = metrics  # For tracking LLM calls in mutation generation
         self.objective_key = config.objective_key
 
-    def set_reflection_examples(self, examples: list[dict[str, object]]) -> None:
+    def set_reflection_examples(self, examples: list[dict[str, Any]]) -> None:
         self._reflection_examples = examples
 
     def set_temperature_mutations_enabled(self, enabled: bool) -> None:
@@ -127,9 +128,9 @@ class Mutator:
         else:
             stats = self._operator_stats.get(generation_method)
             if stats and stats["trials"] > 0:
-                sample_size = stats["trials"]
-                success_rate = stats["promoted"] / max(1, sample_size)
-                avg_delta = stats["delta_sum"] / max(1, sample_size)
+                sample_size = int(stats["trials"])
+                success_rate = float(stats["promoted"]) / max(1, sample_size)
+                avg_delta = float(stats["delta_sum"]) / max(1, sample_size)
 
         if sample_size >= 6 and success_rate == 0.0:
             return 0.0  # temporary cooldown for consistently failing operators
@@ -193,9 +194,9 @@ class Mutator:
 
     async def propose(
         self,
-        parent_contexts: list[dict[str, object]],
+        parent_contexts: list[dict[str, Any]],
         num_mutations: int,
-        task_examples: list[dict[str, object]] | None = None,
+        task_examples: list[dict[str, Any]] | None = None,
         candidate_sink: Callable[[Candidate], Awaitable[None]] | None = None,
     ) -> list[Candidate]:
         """
@@ -315,7 +316,7 @@ class Mutator:
 
     async def _generate_incremental_mutations(
         self,
-        parent_contexts: list[dict[str, object]],
+        parent_contexts: list[dict[str, Any]],
         num_mutations: int,
         candidate_sink: Callable[[Candidate], Awaitable[None]] | None = None,
     ) -> list[Candidate]:
@@ -392,8 +393,10 @@ class Mutator:
 
         _start_reflection = time.time()
         per_call = max(1, getattr(self.config, "mutations_per_call", 1))
+        assert self.batch_reflection_runner is not None, "batch_reflection_runner required for incremental mutations"
+        runner = self.batch_reflection_runner  # Capture for lambda
         mutated_texts = await self._collect_text_batches(
-            lambda: self.batch_reflection_runner(reflection_contexts, per_call, None),
+            lambda: runner(reflection_contexts, per_call, None),
             num_mutations,
             max(1, min(self.config.reflection_batch_size, num_mutations)),
             result_callback=on_text_ready,
@@ -410,9 +413,9 @@ class Mutator:
 
     async def _generate_spec_induction_mutations(
         self,
-        task_examples: list[dict[str, object]],
+        task_examples: list[dict[str, Any]],
         num_mutations: int,
-        parent_contexts: list[dict[str, object]],
+        parent_contexts: list[dict[str, Any]],
         candidate_sink: Callable[[Candidate], Awaitable[None]] | None = None,
     ) -> list[Candidate]:
         """Generate fresh specifications from task I/O examples (PROMPT-MII style)."""
@@ -478,8 +481,10 @@ class Mutator:
 
         _start_spec = time.time()
         per_call = max(1, getattr(self.config, "specs_per_call", 1))
+        assert self.spec_induction_runner is not None, "spec_induction_runner required for spec mutations"
+        spec_runner = self.spec_induction_runner  # Capture for lambda
         spec_texts = await self._collect_text_batches(
-            lambda: self.spec_induction_runner(reflection_contexts, per_call, task_examples),
+            lambda: spec_runner(reflection_contexts, per_call, task_examples),
             num_mutations,
             max(1, min(4, num_mutations)),
             result_callback=on_text_ready,
@@ -522,7 +527,9 @@ class Mutator:
         self.logger.log(f"🌀 Launching {num_calls} mutation task(s) (target {total}, {items_per_call}/call)")
 
         # Launch tasks immediately
-        tasks = [asyncio.create_task(factory()) for _ in range(num_calls)]
+        tasks: list[asyncio.Task[Sequence[str]]] = [
+            asyncio.create_task(cast(Coroutine[Any, Any, Sequence[str]], factory())) for _ in range(num_calls)
+        ]
 
         # Stream results as they complete (don't wait for all)
         results: list[str] = []
@@ -560,11 +567,11 @@ class Mutator:
             valid.append(candidate)
         return valid
 
-    def _best_parent_candidate(self, parent_contexts: Sequence[dict[str, object]]) -> Candidate:
+    def _best_parent_candidate(self, parent_contexts: Sequence[dict[str, Any]]) -> Candidate:
         if not parent_contexts:
             raise ValueError("parent_contexts must not be empty")
 
-        def score(ctx: dict[str, object]) -> float:
+        def score(ctx: dict[str, Any]) -> float:
             candidate = ctx["candidate"]
             meta = candidate.meta or {}
             key = self.objective_key
@@ -584,7 +591,7 @@ class Mutator:
 
         return max(parent_contexts, key=score)["candidate"]
 
-    def _temperature_mutations(self, parent_contexts: Sequence[dict[str, object]], limit: int) -> list[Candidate]:
+    def _temperature_mutations(self, parent_contexts: Sequence[dict[str, Any]], limit: int) -> list[Candidate]:
         if not self.temperature_mutations_enabled or limit <= 0:
             return []
         anchors = [0.0, 0.3, 0.5, 0.7, 1.0]

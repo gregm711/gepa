@@ -71,6 +71,8 @@ class ReplayJob:
 class Orchestrator:
     """Single-island orchestrator loop."""
 
+    _save_task: asyncio.Task[None] | None
+
     def __init__(
         self,
         config: Config,
@@ -116,8 +118,8 @@ class Orchestrator:
         elif island_context is not None:
             self.migration_backend = LocalQueueMigrationBackend(island_context)
         elif getattr(self.config, "migration_backend", None) == "volume":
-            path = self.config.migration_path or os.path.join(self.config.cache_path, "migrations")
-            self.migration_backend = FileMigrationBackend(path, self.config.n_islands)
+            mig_path = self.config.migration_path or os.path.join(self.config.cache_path, "migrations")
+            self.migration_backend = FileMigrationBackend(mig_path, self.config.n_islands)
         else:
             self.migration_backend = NullMigrationBackend()
         self.example_sampler = example_sampler
@@ -180,7 +182,7 @@ class Orchestrator:
         self._governor_monetary_cost_buffer: float = 0.0
         self._governor_prev_total_tokens_spent: int = 0
         self._governor_prev_total_monetary_cost_usd: float = 0.0
-        self._shard_cache: dict[tuple[int, float], list[str]] = {}
+        self._shard_cache: dict[tuple[int | str, float], list[str]] = {}
         self.metrics_callback = metrics_callback
         self.logger: LoggerProtocol = logger or StdOutLogger()
         self.max_rounds: int | None = None
@@ -188,7 +190,8 @@ class Orchestrator:
         self.rounds_completed: int = 0
 
         # Streaming mode: buffer for mutations generated in background
-        self._mutation_task: asyncio.Task | None = None
+        self._mutation_task: asyncio.Task[None] | None = None
+        self._save_task = None  # Background save task for state persistence
         self.eval_batches_completed: int = 0  # For migration timing
 
         # Streaming evaluation infrastructure
@@ -244,7 +247,7 @@ class Orchestrator:
         ]
         self._last_debug_log: float = 0.0
         self._last_budget_log: float = 0.0
-        self._last_shared: dict[str, float] = {}
+        self._last_shared: dict[tuple[str, Any], float] = {}
         # Evolution tracking
         self._mutations_requested: int = 0
         self._mutations_generated: int = 0
@@ -1196,7 +1199,7 @@ class Orchestrator:
         self._start_replay_workers()
 
         # Window tracking mirrors the legacy batch counter so downstream logging stays intact
-        window_size = max(1, self.config.batch_size)
+        window_size = max(1, self.config.batch_size or 1)
         self.eval_batches_completed = max(self.eval_batches_completed, self.round_index)
         window_id = self.eval_batches_completed
         window_start_evals = self.evaluations_run
@@ -1204,7 +1207,7 @@ class Orchestrator:
         # Simple progress tracking for streaming mode
         loop_iter = 0
         last_progress_display = self.evaluations_run
-        last_heartbeat = 0  # Track last heartbeat for hung detection
+        last_heartbeat = 0.0  # Track last heartbeat for hung detection
 
         # Create debug log file for diagnostics
         _debug_log_path: str | None = None
@@ -1262,9 +1265,7 @@ class Orchestrator:
                     break
                 else:
                     _debug_log(
-                        "⚠️  Scheduler convergence ignored (best_full_shard=%.3f < target %.3f)",
-                        best_full,
-                        target_quality,
+                        f"⚠️  Scheduler convergence ignored (best_full_shard={best_full:.3f} < target {target_quality:.3f})"
                     )
                     self.scheduler.reset_final_rung_convergence()
             # Check global timeout
@@ -1389,8 +1390,9 @@ class Orchestrator:
             # SIMPLIFIED: Trigger when queue is running low
             # Keep queue depth at 2x concurrency to maintain saturation
             ready_depth = len(self.queue) + len(self._priority_queue)
-            soft_target = max(int(self._max_total_inflight * self._queue_buffer_mult), self.config.batch_size)
-            hard_target = max(self._max_total_inflight, self.config.batch_size)
+            batch_size = self.config.batch_size or 1
+            soft_target = max(int(self._max_total_inflight * self._queue_buffer_mult), batch_size)
+            hard_target = max(self._max_total_inflight, batch_size)
             need_depth = ready_depth < soft_target
             need_queue = len(self.queue) < hard_target and self._total_inflight >= max(1, hard_target // 2)
             should_spawn_mutations = (need_depth or need_queue) and (
@@ -1440,10 +1442,11 @@ class Orchestrator:
                         task_state = "idle"
                     elif self._mutation_task.done():
                         try:
-                            exc = self._mutation_task.exception()
+                            exc_obj = self._mutation_task.exception()
+                            exc_str = str(exc_obj) if exc_obj else "none"
                         except asyncio.CancelledError:
-                            exc = "cancelled"
-                        task_state = f"done({exc})"
+                            exc_str = "cancelled"
+                        task_state = f"done({exc_str})"
                     else:
                         task_state = "running"
                     self.logger.log(
@@ -1683,7 +1686,7 @@ class Orchestrator:
         except Exception:
             full_shard = 1.0
         metrics_snapshot = self.metrics_snapshot()
-        run_meta = {
+        run_meta: dict[str, Any] = {
             "run_id": self._run_id,
             "stop_reason": self._stop_reason,
             "evaluations": self.evaluations_run,
@@ -2550,15 +2553,16 @@ class Orchestrator:
     def _select_batch(self) -> list[Candidate]:
         batch: list[Candidate] = []
         seen: set[str] = set()
-        while self.queue and len(batch) < self.config.batch_size:
+        batch_size = self.config.batch_size or 1
+        while self.queue and len(batch) < batch_size:
             candidate = self.queue.popleft()
             if candidate.fingerprint in seen:
                 continue
             batch.append(candidate)
             seen.add(candidate.fingerprint)
 
-        if len(batch) < self.config.batch_size:
-            needed = self.config.batch_size - len(batch)
+        if len(batch) < batch_size:
+            needed = batch_size - len(batch)
             exploit = (needed + 1) // 2
             explore = needed // 2
             pareto_entries = self.archive.pareto_entries()
@@ -2576,7 +2580,7 @@ class Orchestrator:
                     explore_entries = random.sample(remaining_entries, sample_size)
                 archive_candidates = [entry.candidate for entry in exploit_entries + explore_entries]
                 for candidate in archive_candidates:
-                    if len(batch) >= self.config.batch_size:
+                    if len(batch) >= batch_size:
                         break
                     if candidate.fingerprint in seen:
                         continue
@@ -3569,7 +3573,7 @@ class Orchestrator:
 
     async def finalize(self, delta: float | None = None) -> None:
         """Finalize the run before returning results."""
-        if hasattr(self, "_save_task") and not self._save_task.done():
+        if self._save_task is not None and not self._save_task.done():
             try:
                 await self._save_task
             except asyncio.CancelledError:
@@ -3580,7 +3584,7 @@ class Orchestrator:
     async def _save_state(self) -> None:
         """Save current orchestrator state to cache for resumability (non-blocking)."""
         # Cancel any previous save that's still running to avoid queue buildup
-        if hasattr(self, "_save_task") and not self._save_task.done():
+        if self._save_task is not None and not self._save_task.done():
             self._save_task.cancel()
 
         pareto_entries = self.archive.pareto_entries()

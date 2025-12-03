@@ -31,7 +31,7 @@ def configure_litellm_client(max_concurrency: int) -> None:
     try:
         _ensure_async_client(litellm, httpx, max_concurrency, keepalive, timeout)
         _ensure_sync_client(litellm, httpx, max_concurrency, keepalive, timeout)
-        litellm.litellm_client = litellm.client_session
+        litellm.litellm_client = litellm.client_session  # type: ignore[attr-defined]
     except Exception:
         # If we cannot provision the shared clients (e.g., platform limitations),
         # fall back to letting litellm create fresh clients per call.
@@ -40,7 +40,7 @@ def configure_litellm_client(max_concurrency: int) -> None:
                 _close_async_client(litellm.aclient_session)
             litellm.aclient_session = None
             litellm.client_session = None
-            litellm.litellm_client = None
+            litellm.litellm_client = None  # type: ignore[attr-defined]
         except Exception:
             pass
         return
@@ -67,7 +67,7 @@ def _disable_litellm_logging(litellm: Any) -> None:
             async def _noop_logging_helper(*_args, **_kwargs) -> None:
                 return None
 
-            utils._client_async_logging_helper = _noop_logging_helper
+            utils._client_async_logging_helper = _noop_logging_helper  # type: ignore[union-attr]
     except Exception:
         # Best-effort logging suppression; failures are non-fatal.
         pass

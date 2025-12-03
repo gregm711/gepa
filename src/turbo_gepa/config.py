@@ -716,14 +716,13 @@ def get_lightning_config(
         >>> config.batch_size
         3
     """
-    modes = {
-        "blitz": blitz_config,
-        "lightning": lightning_config,
-        "sprint": sprint_config,
-        "balanced": lambda ds, base_config=None: adaptive_config(ds, base_config=base_config, strategy="balanced"),
-    }
-
-    if mode not in modes:
-        raise ValueError(f"Unknown lightning mode: '{mode}'. Choose from: {', '.join(modes.keys())}")
-
-    return modes[mode](dataset_size, base_config=base_config)
+    if mode == "blitz":
+        return blitz_config(dataset_size, base_config=base_config)
+    elif mode == "lightning":
+        return lightning_config(dataset_size, base_config=base_config)
+    elif mode == "sprint":
+        return sprint_config(dataset_size, base_config=base_config)
+    elif mode == "balanced":
+        return adaptive_config(dataset_size, base_config=base_config)
+    else:
+        raise ValueError(f"Unknown lightning mode: '{mode}'. Choose from: blitz, lightning, sprint, balanced")
