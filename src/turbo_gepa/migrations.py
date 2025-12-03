@@ -46,11 +46,9 @@ def _safe_unlink(path: Path) -> None:
 class MigrationBackend(Protocol):
     """Interface for sending/receiving elites across islands."""
 
-    def publish(self, from_island: int, candidates: Sequence[Candidate]) -> None:
-        ...
+    def publish(self, from_island: int, candidates: Sequence[Candidate]) -> None: ...
 
-    def consume(self, island_id: int) -> list[Candidate]:
-        ...
+    def consume(self, island_id: int) -> list[Candidate]: ...
 
 
 class NullMigrationBackend(MigrationBackend):

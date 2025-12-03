@@ -146,8 +146,7 @@ class DiskCache:
                     result = EvalResult(
                         objectives=dict(record["objectives"]),
                         traces=[
-                            dict(trace) if isinstance(trace, dict) else trace
-                            for trace in record.get("traces", [])
+                            dict(trace) if isinstance(trace, dict) else trace for trace in record.get("traces", [])
                         ],
                         n_examples=record.get("n_examples", 1),
                         shard_fraction=record.get("shard_fraction"),
@@ -226,6 +225,73 @@ class DiskCache:
 
         # Write all candidate batches in parallel
         await asyncio.gather(*(write_batch(k, v) for k, v in by_candidate.items()))
+
+    async def update_trace_diagnostic(
+        self,
+        candidate: Candidate,
+        example_id: str,
+        diagnostic: dict[str, object],
+    ) -> None:
+        """Update an existing cached trace with diagnostic info and persist to disk.
+
+        This is used after judge runs to persist diagnostics so future cache hits
+        include the diagnostic and don't re-trigger the judge.
+        """
+        cand_hash = candidate_key(candidate)
+        path = self._record_path(cand_hash)
+        lock = self._lock_for(cand_hash)
+
+        async with lock:
+            # Update in-memory cache
+            cache = self._record_cache.get(cand_hash)
+            if cache and example_id in cache:
+                result = cache[example_id]
+                if result.traces:
+                    for trace in result.traces:
+                        if isinstance(trace, dict):
+                            trace["diagnostic"] = diagnostic
+                            break
+
+            # Persist to disk: read all records, update matching one, rewrite file
+            async with self._file_semaphore:
+                await asyncio.to_thread(self._update_record_on_disk, path, example_id, diagnostic)
+
+    def _update_record_on_disk(
+        self,
+        path: Path,
+        example_id: str,
+        diagnostic: dict[str, object],
+    ) -> None:
+        """Update a specific record's trace diagnostic on disk."""
+        if not path.exists():
+            return
+
+        # Read all records
+        records: list[dict[str, object]] = []
+        updated = False
+        with self._file_lock(path):
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                        if record.get("example_id") == example_id:
+                            # Update traces with diagnostic
+                            traces = record.get("traces", [])
+                            if isinstance(traces, list):
+                                for trace in traces:
+                                    if isinstance(trace, dict):
+                                        trace["diagnostic"] = diagnostic
+                                        updated = True
+                                        break
+                        records.append(record)
+                    except json.JSONDecodeError:
+                        continue  # Skip malformed lines
+
+            # Rewrite file only if we updated something
+            if updated and records:
+                with path.open("w", encoding="utf-8") as handle:
+                    for record in records:
+                        handle.write(json.dumps(record) + "\n")
 
     def clear(self) -> None:
         """Remove all cached records (useful for tests)."""

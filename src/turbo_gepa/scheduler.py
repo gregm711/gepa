@@ -17,11 +17,10 @@ from .interfaces import Candidate, EvalResult
 logger = logging.getLogger(__name__)
 
 
-
-
 @dataclass
 class SchedulerConfig:
     """Variance-aware scheduler config with rung-specific promotion thresholds."""
+
     shards: Sequence[float]
 
     # Variance-aware promotion: rung-specific tolerance values

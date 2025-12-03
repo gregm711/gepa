@@ -51,29 +51,26 @@ def build_progress_snapshot(orchestrator: Orchestrator) -> ProgressSnapshot:
     """Collect a ProgressSnapshot from the orchestrator."""
 
     pareto_entries = orchestrator.archive.pareto_entries()
-    
+
     # Use helper to get true full-shard best quality (scanning all results, not just Pareto)
     best_quality = orchestrator._get_best_quality_from_full_shard()
-    
-    # If no full-shard results yet, allow fallback to best observed metric 
+
+    # If no full-shard results yet, allow fallback to best observed metric
     # ONLY if no target quality is set (soft mode). For benchmarks, stay strict at 0.0.
     if best_quality <= 0.0 and orchestrator.config.target_quality is None:
-         best_quality = orchestrator.metrics.best_quality
+        best_quality = orchestrator.metrics.best_quality
 
     best_shard = orchestrator.metrics.best_shard_fraction
     snippet: str | None = None
-    
+
     if orchestrator._north_star_prompt:
         snippet = orchestrator._north_star_prompt
     elif pareto_entries:
         # Fallback to best Pareto entry for snippet
-        best_entry = pareto_entries[0] # Default
+        best_entry = pareto_entries[0]  # Default
         try:
             promote_obj = orchestrator.config.promote_objective
-            best_entry = max(
-                pareto_entries,
-                key=lambda entry: entry.result.objectives.get(promote_obj, 0.0)
-            )
+            best_entry = max(pareto_entries, key=lambda entry: entry.result.objectives.get(promote_obj, 0.0))
         except Exception:
             pass
         snippet = _truncate_prompt(best_entry.candidate.text)
@@ -82,11 +79,7 @@ def build_progress_snapshot(orchestrator: Orchestrator) -> ProgressSnapshot:
     target_shard = float(getattr(orchestrator.config, "target_shard_fraction", 1.0) or 1.0)
     tol = 1e-6
     # Consider target reached only when both quality and shard criteria are met
-    target_reached = (
-        target is not None
-        and best_quality >= target
-        and (best_shard + tol) >= target_shard
-    )
+    target_reached = target is not None and best_quality >= target and (best_shard + tol) >= target_shard
     run_started_at = orchestrator.run_started_at or time.time()
     metrics = getattr(orchestrator, "metrics", None)
     attempts = dict(getattr(metrics, "promotion_attempts_by_rung", {})) if metrics else {}
@@ -157,7 +150,9 @@ class ProgressReporter:
 
         delta_str = f"{best_delta:+.3f}" if abs(best_delta) >= 5e-4 else "0.000"
         since_str = (
-            f"{time_since_improve:.0f}s ago" if time_since_improve is not None and time_since_improve >= 1.0 else "just now"
+            f"{time_since_improve:.0f}s ago"
+            if time_since_improve is not None and time_since_improve >= 1.0
+            else "just now"
         )
 
         rung_stats = ""

@@ -42,7 +42,7 @@ class TelemetrySnapshot:
     # System State
     run_id: str = "unknown"
     island_id: int = 0
-    status: str = "running" # running, paused, stopping, etc.
+    status: str = "running"  # running, paused, stopping, etc.
     total_cost_usd: float = 0.0
 
 
@@ -84,7 +84,7 @@ class TelemetryCollector:
     def record_eval_completion(self, latency: float, error: bool = False):
         self._evals_completed += 1
         self._latencies.append(latency)
-        if len(self._latencies) > 20: # Keep window small for responsiveness
+        if len(self._latencies) > 20:  # Keep window small for responsiveness
             self._latencies.pop(0)
         if error:
             self._errors += 1
@@ -92,22 +92,23 @@ class TelemetryCollector:
     def record_mutation_generated(self):
         self._mutations_generated += 1
 
-    def snapshot(self,
-                 inflight: int,
-                 limit: int,
-                 queue_ready: int,
-                 queue_mutation: int,
-                 queue_replay: int,
-                 straggler_count: int,
-                 cost: float = 0.0) -> TelemetrySnapshot:
-
+    def snapshot(
+        self,
+        inflight: int,
+        limit: int,
+        queue_ready: int,
+        queue_mutation: int,
+        queue_replay: int,
+        straggler_count: int,
+        cost: float = 0.0,
+    ) -> TelemetrySnapshot:
         now = time.time()
         delta = max(0.1, now - self._last_flush)
 
         # Calculate rates with EMA smoothing
         raw_eval_rate = (self._evals_completed - self._last_eval_count) / delta
         raw_mut_rate = (self._mutations_generated - self._last_mutation_count) / delta
-        
+
         self._eval_rate_ema = 0.2 * raw_eval_rate + 0.8 * self._eval_rate_ema
         self._mutation_rate_ema = 0.2 * raw_mut_rate + 0.8 * self._mutation_rate_ema
 
@@ -140,7 +141,7 @@ class TelemetryCollector:
             error_rate=err_rate,
             run_id=self.run_id,
             island_id=self.island_id,
-            total_cost_usd=cost
+            total_cost_usd=cost,
         )
 
         # Update baselines for next rate calc
@@ -158,4 +159,4 @@ class TelemetryCollector:
                 json.dump(asdict(snapshot), f)
             temp_path.replace(self.telemetry_file)
         except Exception:
-            pass # Never crash the engine on telemetry write failure
+            pass  # Never crash the engine on telemetry write failure

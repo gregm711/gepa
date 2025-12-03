@@ -73,6 +73,7 @@ def run_worker_from_factory(
 
     if package:
         import importlib
+
         importlib.import_module(package)
     factory_fn = _resolve_factory(factory)
     built = factory_fn()
@@ -123,7 +124,9 @@ def _load_seeds_from_path(path: str | None) -> list[str] | None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a TurboGEPA worker for distributed islands.")
-    parser.add_argument("--factory", required=True, help="Import path to callable returning DefaultAdapter or (adapter, seeds).")
+    parser.add_argument(
+        "--factory", required=True, help="Import path to callable returning DefaultAdapter or (adapter, seeds)."
+    )
     parser.add_argument("--worker-id", type=int, required=True, help="Zero-based worker identifier.")
     parser.add_argument("--worker-count", type=int, required=True, help="Total number of workers participating.")
     parser.add_argument("--islands-per-worker", type=int, help="Explicit islands per worker (defaults to even split).")

@@ -291,6 +291,7 @@ class Mutator:
 
         # Telemetry: Record generated count
         from turbo_gepa.telemetry import TelemetryCollector
+
         telemetry = TelemetryCollector.get_instance()
         if telemetry:
             for _ in range(len(proposals)):
@@ -388,6 +389,7 @@ class Mutator:
 
         # Track LLM calls for reflection mutations
         import time
+
         _start_reflection = time.time()
         per_call = max(1, getattr(self.config, "mutations_per_call", 1))
         mutated_texts = await self._collect_text_batches(
@@ -473,6 +475,7 @@ class Mutator:
                 await candidate_sink(candidate)
 
         import time
+
         _start_spec = time.time()
         per_call = max(1, getattr(self.config, "specs_per_call", 1))
         spec_texts = await self._collect_text_batches(
@@ -514,6 +517,7 @@ class Mutator:
             return []
 
         import math as _math
+
         num_calls = max(1, _math.ceil(total / max(1, items_per_call)))
         self.logger.log(f"🌀 Launching {num_calls} mutation task(s) (target {total}, {items_per_call}/call)")
 
