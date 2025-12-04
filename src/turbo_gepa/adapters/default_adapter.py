@@ -14,16 +14,15 @@ settings via ModelConfig; DefaultAdapter uses LiteLLM directly by default.
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 import os
-import random
 import re
 import shutil
 import tempfile
 import uuid
 from collections import defaultdict
 from collections.abc import Callable
-import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Sequence
@@ -48,6 +47,7 @@ from turbo_gepa.sampler import InstanceSampler
 from turbo_gepa.scoring import SCORE_KEY, ScoringFn
 from turbo_gepa.strategies import ReflectionStrategy, get_evaluator_feedback_strategy
 from turbo_gepa.utils.litellm_client import configure_litellm_client
+from turbo_gepa.utils.llm_request_manager import get_llm_request_manager
 
 # Type alias for custom evaluation functions.
 # Takes (model_output, expected_answer, example_payload) and returns metrics dict.
@@ -312,6 +312,8 @@ class DefaultAdapter:
         reflection_limit = max(1, base_limit // 2)
         self._task_llm_semaphore = _asyncio_adapter.Semaphore(task_limit)
         self._reflection_llm_semaphore = _asyncio_adapter.Semaphore(reflection_limit)
+        # Shared, status-aware request manager (throttles on 429/5xx)
+        self._llm_manager = get_llm_request_manager(base_limit, logger=self.logger)
 
         # Normalise model configuration objects
         if isinstance(task_lm, ModelConfig):
@@ -1088,31 +1090,12 @@ class DefaultAdapter:
         max_attempts: int = 3,
         base_delay: float = 1.5,
     ):
-        """Execute an async factory with exponential backoff."""
-        import asyncio
-
-        last_exc: Exception | None = None
-        for attempt in range(1, max_attempts + 1):
-            try:
-                return await coro_factory()
-            except Exception as exc:
-                last_exc = exc
-                transient = isinstance(exc, RuntimeError) or "OpenrouterException" in str(exc)
-                critical = any(keyword in str(exc).lower() for keyword in ("too many open files", "ssl", "timeout"))
-                if not transient or critical:
-                    raise
-                if attempt >= max_attempts:
-                    raise
-                delay = base_delay * (1.5 ** (attempt - 1))
-                delay = min(3.0, delay)
-                delay += random.uniform(0.0, 0.3)
-                self.logger.log(
-                    f"⚠️  LLM call '{label}' failed (attempt {attempt}/{max_attempts}): {exc}. Retrying in {delay:.1f}s",
-                    LogLevel.WARNING,
-                )
-                await asyncio.sleep(delay)
-        if last_exc:
-            raise last_exc
+        """Execute an async factory with shared, status-aware backoff."""
+        manager = getattr(self, "_llm_manager", None)
+        if manager is None:
+            # Fallback for legacy instances; keep behavior sane.
+            return await coro_factory()
+        return await manager.run(label, coro_factory, max_attempts=max_attempts, base_delay=base_delay)
 
     async def _task_runner(self, candidate: Candidate, example_id: str) -> dict[str, float]:
         """Execute task LLM on a single example."""

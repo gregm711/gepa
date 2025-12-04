@@ -60,6 +60,7 @@ from turbo_gepa.orchestrator import Orchestrator
 from turbo_gepa.sampler import InstanceSampler
 from turbo_gepa.scoring import SCORE_KEY, ScoringFn
 from turbo_gepa.utils.litellm_client import configure_litellm_client
+from turbo_gepa.utils.llm_request_manager import get_llm_request_manager
 
 DSPyTrace = list[tuple[Any, dict[str, Any], Prediction]]
 
@@ -391,29 +392,8 @@ class DSpyAdapter:
         base_delay: float = 1.5,
     ):
         """Retry helper for LLM calls."""
-        import asyncio
-
-        last_exc: Exception | None = None
-        for attempt in range(1, max_attempts + 1):
-            try:
-                return await coro_factory()
-            except Exception as exc:  # pragma: no cover - defensive path
-                last_exc = exc
-                if attempt >= max_attempts:
-                    raise
-                delay = base_delay * (2 ** (attempt - 1))
-                delay += self._async_random.uniform(0.0, 0.5)
-                logging.warning(
-                    "LLM call '%s' failed (attempt %s/%s): %s. Retrying in %.1fs",
-                    label,
-                    attempt,
-                    max_attempts,
-                    exc,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-        if last_exc:
-            raise last_exc
+        manager = get_llm_request_manager(self.config.eval_concurrency, logger=getattr(self, "logger", None))
+        return await manager.run(label, coro_factory, max_attempts=max_attempts, base_delay=base_delay)
 
     async def _llm_reflection(
         self,

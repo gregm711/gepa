@@ -7,13 +7,13 @@ structured, task-specific starting prompts.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
 import re
 from typing import Any
 
 from .interfaces import Candidate
+from .utils.llm_request_manager import get_llm_request_manager
 
 _retry_rng = random.Random()
 
@@ -25,27 +25,8 @@ async def _call_with_retries(
     max_attempts: int = 3,
     base_delay: float = 1.5,
 ):
-    last_exc: Exception | None = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            return await coro_factory()
-        except Exception as exc:  # pragma: no cover - network failures
-            last_exc = exc
-            if attempt >= max_attempts:
-                raise
-            delay = base_delay * (2 ** (attempt - 1))
-            delay += _retry_rng.uniform(0.0, 0.5)
-            logging.warning(
-                "Seed initializer LLM call '%s' failed (attempt %s/%s): %s. Retrying in %.1fs",
-                label,
-                attempt,
-                max_attempts,
-                exc,
-                delay,
-            )
-            await asyncio.sleep(delay)
-    if last_exc:
-        raise last_exc
+    manager = get_llm_request_manager(4)  # Seed init is lightweight; small cap is fine.
+    return await manager.run(label, coro_factory, max_attempts=max_attempts, base_delay=base_delay)
 
 
 async def initialize_seeds_from_examples(
