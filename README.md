@@ -192,7 +192,7 @@ All built-in strategy definitions (and reference system prompts) live in `src/tu
 
 #### Optional: LLM-as-Judge Feedback
 
-TurboGEPA supports an opt-in **LLM judge** that provides rich diagnostic feedback to guide reflection strategies. This is inspired by Prompt Learning research showing that detailed failure analysis can improve prompt evolution quality.
+TurboGEPA supports an opt-in **LLM judge** that provides rich diagnostic feedback to guide reflection strategies. This is inspired by Prompt Learning research showing that detailed failure analysis can improve prompt evolution quality. When a judge is enabled, its diagnostics are automatically surfaced to all reflection strategies, and the judge-aware strategy is added by default so feedback drives mutations.
 
 **Key features:**
 - **Backward compatible**: Disabled by default, no changes to existing behavior
@@ -215,13 +215,7 @@ adapter = DefaultAdapter(
     judge_sample_rate=0.2,  # Only judge 20% of traces (cost control)
     judge_on_fail_only=True,  # Only judge failures (quality < threshold)
 )
-
-# Enable the evaluator_feedback_reflection strategy to use judge diagnostics
-adapter.config.reflection_strategy_names = (
-    "incremental_reflection",
-    "spec_induction",
-    "evaluator_feedback_reflection",  # Uses judge diagnostics
-)
+# No extra flags needed: judge diagnostics are fed into reflection by default.
 ```
 
 **Custom judge function:**
@@ -252,22 +246,7 @@ adapter = DefaultAdapter(
 - `"coding"`: Code generation (understanding, approach, implementation, edge_cases failures)
 - `"generic"`: General tasks (understanding, reasoning, execution, formatting failures)
 
-**The `evaluator_feedback_reflection` strategy** aggregates judge diagnostics from parent contexts to generate targeted mutations that address specific failure modes. It's opt-in and should be explicitly added to `reflection_strategy_names`.
-
-Example:
-
-```python
-from turbo_gepa.config import Config
-from turbo_gepa.scoring import maximize_metric
-
-config = Config(
-    reflection_strategy_names=(
-        "incremental_reflection",
-        "spec_induction",
-        "interleaved_thinking",
-    )
-)
-```
+**Judge feedback in reflection:** Judge diagnostics are automatically included in parent summaries shown to every reflection strategy. The judge-aware `evaluator_feedback_reflection` strategy is also auto-added when a judge is enabled; include it explicitly only if you want to control ordering alongside other custom strategies.
 
 Add your own `ReflectionStrategy` objects by setting `config.reflection_strategies` (they’ll be appended to the built-ins).
 

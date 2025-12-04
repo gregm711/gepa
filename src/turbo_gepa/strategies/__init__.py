@@ -39,6 +39,7 @@ def _format_parent_summaries(parent_contexts: Sequence[dict[str, Any]]) -> str:
         prompt_text = ctx.get("prompt", "")
         meta = ctx.get("meta", {}) or {}
         traces = ctx.get("traces", []) or []
+        diagnostics = ctx.get("diagnostics", []) or []
 
         objective_key = meta.get("objective_key", "quality")
         parent_objectives = meta.get("parent_objectives")
@@ -61,11 +62,48 @@ def _format_parent_summaries(parent_contexts: Sequence[dict[str, Any]]) -> str:
         if objective_key != "quality":
             label = objective_key
         perf_summary = f"Recent avg: {avg_quality:.1%}" if traces else f"{label}: {quality:.1%}"
-        summaries.append(
-            f"""PROMPT {chr(65 + i)} ({perf_summary}{shard_info}):
+
+        diag_entries: list[dict[str, Any]] = []
+        if isinstance(diagnostics, list):
+            diag_entries.extend([d for d in diagnostics if isinstance(d, dict)])
+        for trace in traces[:5]:
+            diag = trace.get("diagnostic") if isinstance(trace, dict) else None
+            if isinstance(diag, dict):
+                diag_entries.append(diag)
+
+        diag_lines: list[str] = []
+        if diag_entries:
+            stage_counts: dict[str, int] = {}
+            suggestions: list[str] = []
+            for diag in diag_entries:
+                stage = diag.get("failure_stage")
+                if isinstance(stage, str) and stage and stage != "none":
+                    stage_counts[stage] = stage_counts.get(stage, 0) + 1
+                sugg = diag.get("suggestions")
+                if isinstance(sugg, list):
+                    for s in sugg:
+                        if isinstance(s, str) and s.strip():
+                            suggestions.append(s.strip())
+            if stage_counts:
+                stage_summary = ", ".join(f"{k}:{v}" for k, v in sorted(stage_counts.items(), key=lambda x: -x[1]))
+                diag_lines.append(f"Diagnostics: stages={stage_summary}")
+            if suggestions:
+                unique_suggestions: list[str] = []
+                seen: set[str] = set()
+                for s in suggestions:
+                    key = s.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    unique_suggestions.append(s)
+                diag_lines.append(f"Suggestions: {'; '.join(unique_suggestions[:3])}")
+
+        block = f"""PROMPT {chr(65 + i)} ({perf_summary}{shard_info}):
 "{prompt_text.strip()}"
 """
-        )
+        if diag_lines:
+            block += "\n".join(diag_lines) + "\n"
+        summaries.append(block)
 
     return "\n".join(summaries)
 

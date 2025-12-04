@@ -8,9 +8,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from turbo_gepa.adapters.default_adapter import DefaultAdapter, DefaultDataInst
 from turbo_gepa.cache import DiskCache
+from turbo_gepa.config import Config
 from turbo_gepa.evaluator import AsyncEvaluator, JudgeFn
 from turbo_gepa.interfaces import Candidate, EvalResult
+from turbo_gepa.strategies import _format_parent_summaries
 
 
 # ============================================================================
@@ -467,3 +470,71 @@ def test_evaluator_feedback_extracts_from_traces():
     assert "S1" in suggestions
     assert "S2" in suggestions
     assert len(sample_diagnostics) == 2
+
+
+def test_parent_summaries_include_diagnostics():
+    """Parent summaries should surface judge diagnostics for all strategies."""
+
+    parent_contexts = [
+        {
+            "prompt": "You are an assistant.",
+            "meta": {"objective_key": "quality", "quality": 0.4},
+            "traces": [
+                {
+                    "quality": 0.3,
+                    "diagnostic": {"failure_stage": "reasoning", "suggestions": ["Be explicit", "Show steps"]},
+                }
+            ],
+            "diagnostics": [{"failure_stage": "retrieval", "suggestions": ["Cite sources"]}],
+        }
+    ]
+
+    summary = _format_parent_summaries(parent_contexts)
+    assert "Diagnostics:" in summary
+    assert "retrieval" in summary.lower()
+    assert "suggestions" in summary.lower()
+
+
+# ============================================================================
+# Test judge auto-wires feedback strategy
+# ============================================================================
+
+
+def test_judge_auto_adds_feedback_strategy_with_custom_names():
+    """If judge is configured, feedback strategy should be included even with custom names."""
+
+    async def dummy_judge(_output, _expected, _example, _candidate):
+        return {"quality": 0.4, "failure_stage": "reasoning", "suggestions": ["Add steps"]}
+
+    config = Config(reflection_strategy_names=("incremental_reflection",), shards=(1.0,), eval_concurrency=1)
+    dataset = [DefaultDataInst(input="x", answer="1")]
+    adapter = DefaultAdapter(
+        dataset=dataset,
+        task_lm="local/test",
+        reflection_lm="local/test",
+        config=config,
+        auto_config=False,
+        judge_fn=dummy_judge,
+    )
+
+    names = [strategy.name for strategy in adapter._reflection_strategies]
+    assert "incremental_reflection" in names
+    assert "evaluator_feedback_reflection" in names
+
+
+def test_no_judge_keeps_feedback_strategy_absent():
+    """Without judge configured, feedback strategy should not be auto-added."""
+
+    config = Config(reflection_strategy_names=("incremental_reflection",), shards=(1.0,), eval_concurrency=1)
+    dataset = [DefaultDataInst(input="x", answer="1")]
+    adapter = DefaultAdapter(
+        dataset=dataset,
+        task_lm="local/test",
+        reflection_lm="local/test",
+        config=config,
+        auto_config=False,
+    )
+
+    names = [strategy.name for strategy in adapter._reflection_strategies]
+    assert "incremental_reflection" in names
+    assert "evaluator_feedback_reflection" not in names

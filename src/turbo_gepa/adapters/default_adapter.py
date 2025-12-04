@@ -23,7 +23,8 @@ import tempfile
 import uuid
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+import copy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Sequence
 
@@ -45,7 +46,7 @@ from turbo_gepa.mutator import MutationConfig, Mutator
 from turbo_gepa.orchestrator import Orchestrator
 from turbo_gepa.sampler import InstanceSampler
 from turbo_gepa.scoring import SCORE_KEY, ScoringFn
-from turbo_gepa.strategies import ReflectionStrategy
+from turbo_gepa.strategies import ReflectionStrategy, get_evaluator_feedback_strategy
 from turbo_gepa.utils.litellm_client import configure_litellm_client
 
 # Type alias for custom evaluation functions.
@@ -262,7 +263,9 @@ class DefaultAdapter:
         if auto_config and config == DEFAULT_CONFIG:
             config = adaptive_config(len(dataset))
 
-        config = replace(config)
+        # Work on a defensive copy so caller config stays untouched and __post_init__ logic
+        # doesn't run twice (dataclasses.replace would re-run it and duplicate strategies).
+        config = copy.deepcopy(config)
         config.promote_objective = SCORE_KEY
         if scoring_fn is not None:
             config.scoring_fn = scoring_fn
@@ -360,6 +363,15 @@ class DefaultAdapter:
 
         # If judge_model is provided but judge_fn is not, we'll create a default judge later
         # (deferred to avoid import at module load time)
+
+        # Auto-enable judge-aware reflection when a judge is configured so diagnostics guide mutations.
+        judge_active = bool(self._judge_fn or self._judge_model)
+        if judge_active:
+            strategies = list(self.config.reflection_strategies or ())
+            names = {strategy.name for strategy in strategies}
+            if "evaluator_feedback_reflection" not in names:
+                strategies.append(get_evaluator_feedback_strategy())
+                self.config.reflection_strategies = tuple(strategies)
 
         # Configure reflection/spec strategies
         self._reflection_strategies: tuple[ReflectionStrategy, ...] = tuple(self.config.reflection_strategies or ())
